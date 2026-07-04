@@ -142,15 +142,15 @@ export default class CustomImageAutoUploader extends Plugin {
         setMenu(menu, this, true, true)
       })
     )
-
+    this.registerEvent(
+      this.app.workspace.on("url-menu", (menu: Menu, url: string) => {
+        this.addDeleteCurrentImageMenuItem(menu, url)
+      })
+    )
     this.addRibbonIcon("image", "Custom Image Auto Uploader", (event) => {
       const menu = new Menu()
       setMenu(menu, this, true)
       menu.showAtMouseEvent(event)
-    })
-
-    this.registerDomEvent(document, "contextmenu", (event: MouseEvent) => {
-      this.handleImageContextMenu(event)
     })
   }
 
@@ -696,32 +696,7 @@ export default class CustomImageAutoUploader extends Plugin {
     }, this.settings.remoteTrashPollIntervalMs)
   }
 
-  handleImageContextMenu(event: MouseEvent) {
-    const target = event.target
-    if (!(target instanceof HTMLElement)) return
-
-    const imageElement = target.closest("img")
-    if (!(imageElement instanceof HTMLImageElement)) return
-
-    const imageUrl = this.normalizeRemoteImageUrl(imageElement.currentSrc || imageElement.src)
-    if (!this.canHandleRemoteImageContextMenu(imageElement, imageUrl)) return
-
-    event.preventDefault()
-    event.stopPropagation()
-
-    const menu = new Menu()
-    menu.addItem((item) => {
-      item
-        .setIcon("trash")
-        .setTitle($("删除图片并延迟移到远端回收站"))
-        .onClick(async () => {
-          await this.deleteRemoteImageFromCurrentNote(imageUrl)
-        })
-    })
-    menu.showAtMouseEvent(event)
-  }
-
-  canHandleRemoteImageContextMenu(imageElement: HTMLImageElement, imageUrl: string): boolean {
+  canHandleRemoteImageContextMenu(imageUrl: string): boolean {
     if (!imageUrl.startsWith("http://") && !imageUrl.startsWith("https://")) {
       return false
     }
@@ -730,10 +705,24 @@ export default class CustomImageAutoUploader extends Plugin {
     if (!(activeFile instanceof TFile) || activeFile.extension !== "md") {
       return false
     }
+    return true
+  }
 
-    const sourceViewContainer = imageElement.closest(".markdown-source-view, .cm-content")
-    const readingViewContainer = imageElement.closest(".markdown-preview-view, .markdown-reading-view")
-    return sourceViewContainer !== null || readingViewContainer !== null
+  addDeleteCurrentImageMenuItem(menu: Menu, imageUrl: string) {
+    const normalizedImageUrl = this.normalizeRemoteImageUrl(imageUrl)
+    if (!this.canHandleRemoteImageContextMenu(normalizedImageUrl)) {
+      return
+    }
+
+    menu.addItem((item) => {
+      item
+        .setIcon("trash")
+        .setTitle($("删除当前图片"))
+        .setWarning(true)
+        .onClick(async () => {
+          await this.deleteRemoteImageFromCurrentNote(normalizedImageUrl)
+        })
+    })
   }
 
   async deleteRemoteImageFromCurrentNote(imageUrl: string) {

@@ -112,7 +112,7 @@ export default <LangMap>{
   "上传全库图片": "Upload Whole Vault Images",
   "删除未引用图片（全库）": "Delete all unreferenced images in the vault",
   "已删除 ${count} 张未引用图片": "Deleted ${count} unreferenced images",
-  "删除图片并延迟移到远端回收站": "Delete image and delay moving it to remote trash",
+  "删除当前图片": "Delete current image",
   "已创建远端回收任务，图片将在宽限期后检查并移入 .trash": "A remote trash task has been created. The image will be checked after the grace period and moved to .trash",
   "当前图片引用删除失败": "Failed to delete the current image reference",
   "当前图片不是受支持的远端图片": "The current image is not a supported remote image",

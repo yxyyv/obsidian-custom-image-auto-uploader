@@ -490,9 +490,6 @@ export function setMenu(menu: Menu, plugin: CustomImageAutoUploader, isShowAuto:
   (menu as any)._hasImageUploaderMenu = true
 
   if (isShowAuto) {
-
-    //ddddd
-
     menu.addSeparator()
     menu.addItem((item: MenuItem) => {
       item
