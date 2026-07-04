@@ -40,6 +40,9 @@ export default <LangMap>{
   "API 访问令牌": "API access token",
   "用于访问API的令牌": "Token used to access the API",
   "输入您的 API 访问令牌": "Enter your API access token",
+  "上传配置 ID": "Upload config ID",
+  "多用户网关场景下，用于指定本次上传使用的配置；留空则使用服务端当前已启用配置": "In a multi-user gateway, specify which upload configuration to use for this upload; leave empty to use the server's currently enabled configuration",
+  "输入您的上传配置 ID": "Enter your upload config ID",
   "输入您的 Custom Image Gateway 地址": "Enter your Custom Image Gateway address",
 
   "接口配置信息已经粘贴到设置中!": "Interface configuration information has been pasted into the settings!",

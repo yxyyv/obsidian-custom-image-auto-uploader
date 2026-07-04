@@ -324,6 +324,10 @@ export async function imageUpload(file: TFile, postData: UploadSet | undefined, 
     requestData.append(v, postData[v])
   })
 
+  if (plugin.settings.uploadConfigId.trim() !== "") {
+    requestData.append("id", plugin.settings.uploadConfigId.trim())
+  }
+
   let response
   try {
     response = await fetch(plugin.settings.api, { method: "POST", headers: plugin.settings.apiToken == "" ? new Headers() : new Headers({ Authorization: plugin.settings.apiToken }), body: requestData })

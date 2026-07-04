@@ -42,6 +42,8 @@ export interface PluginSettings {
   api: string
   //API Token
   apiToken: string
+  // Upload config ID for multi-user gateway
+  uploadConfigId: string
   clipboardReadTip: string
   //处理排除的域名清单
   excludeDomains: string
@@ -83,6 +85,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   api: "http://127.0.0.1:36677/upload",
   // API 令牌
   apiToken: "",
+  // Upload config ID
+  uploadConfigId: "",
   clipboardReadTip: "",
   // 排除的域名列表
   excludeDomains: "",
@@ -200,6 +204,19 @@ export class SettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.apiToken)
           .onChange(async (value) => {
             this.plugin.settings.apiToken = value
+            await this.plugin.saveSettings()
+          })
+      )
+
+    new Setting(set)
+      .setName($("上传配置 ID"))
+      .setDesc($("多用户网关场景下，用于指定本次上传使用的配置；留空则使用服务端当前已启用配置"))
+      .addText((text) =>
+        text
+          .setPlaceholder($("输入您的上传配置 ID"))
+          .setValue(this.plugin.settings.uploadConfigId)
+          .onChange(async (value) => {
+            this.plugin.settings.uploadConfigId = value.trim()
             await this.plugin.saveSettings()
           })
       )

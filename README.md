@@ -64,6 +64,9 @@ We are continuously improving; here are the future development plans:
     If using a self-hosted image host, please set **Upload Settings** > **API Gateway Address** to your **Custom Image Gateway** address.
     > Example: `http://127.0.0.1:9000/api/upload`
 
+    If you are using a multi-user gateway, you can also fill in **Upload config ID** to select a specific upload configuration.
+    If left empty, the gateway will fall back to the server-side currently enabled configuration for compatibility.
+
 3.  **Configure Authentication**
     Set the **API Access Token** (Token) to ensure security.
 
@@ -78,6 +81,9 @@ We are continuously improving; here are the future development plans:
 The advanced features of this plugin require the use of **Custom Image Gateway**.
 
 > **Custom Image Gateway** is a free and open-source image upload gateway tool.
+
+For the multi-user upload API, clients can explicitly pass a cloud-config `id` to choose which upload configuration to use.
+If `id` is not provided, the gateway still falls back to the user's currently enabled configuration for backward compatibility.
 
 *   **Project Address**: [haierkeys/custom-image-gateway](https://github.com/haierkeys/custom-image-gateway)
 *   **Deployment Documentation**: Please refer to the project homepage for deployment.

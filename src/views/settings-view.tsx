@@ -6,9 +6,10 @@ import { $ } from "src/lang/lang";
 
 
 async function getClipboardContent(plugin: CustomImageAutoUploader): Promise<void> {
-  const clipboardReadTipSave = async (api: string, apiToken: string, clipboardReadTip: string) => {
+  const clipboardReadTipSave = async (api: string, apiToken: string, uploadConfigId: string, clipboardReadTip: string) => {
     plugin.settings.api = api
     plugin.settings.apiToken = apiToken
+    plugin.settings.uploadConfigId = uploadConfigId
     plugin.settings.clipboardReadTip = clipboardReadTip
 
     await plugin.saveData(plugin.settings)
@@ -51,9 +52,10 @@ async function getClipboardContent(plugin: CustomImageAutoUploader): Promise<voi
       if (typeof parsedData === "object" && parsedData !== null) {
         const hasApi = "api" in parsedData
         const hasApiToken = "apiToken" in parsedData
+        const uploadConfigId = "id" in parsedData && parsedData.id != null ? String(parsedData.id) : ""
 
         if (hasApi && hasApiToken) {
-          clipboardReadTipSave(parsedData.api, parsedData.apiToken, $("接口配置信息已经粘贴到设置中!"))
+          clipboardReadTipSave(parsedData.api, parsedData.apiToken, uploadConfigId, $("接口配置信息已经粘贴到设置中!"))
         } else {
           clipboardReadTipTipSave($("未检测到配置信息!"))
         }
