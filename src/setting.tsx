@@ -57,6 +57,9 @@ export interface PluginSettings {
   compressMaxWidth: number
   compressMaxHeight: number
   compressQuality: number
+  remoteTrashGraceMs: number
+  remoteTrashHistoryRetentionMs: number
+  remoteTrashPollIntervalMs: number
   //内容部分上传设置
   contentSet: UploadSet
   //元数据上传设置
@@ -99,6 +102,9 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   compressMaxWidth: 1200,
   compressMaxHeight: 1200,
   compressQuality: 1,
+  remoteTrashGraceMs: 24 * 60 * 60 * 1000,
+  remoteTrashHistoryRetentionMs: 7 * 24 * 60 * 60 * 1000,
+  remoteTrashPollIntervalMs: 5 * 60 * 1000,
   // 内容部分上传设置
   contentSet: { key: "", type: ImageSvrProcessMode.none.value, width: "0", height: "0" },
   // 元数据上传设置
@@ -219,6 +225,50 @@ export class SettingTab extends PluginSettingTab {
             this.plugin.settings.uploadConfigId = value.trim()
             await this.plugin.saveSettings()
           })
+      )
+
+    new Setting(set)
+      .setName("| " + $("远端回收"))
+      .setHeading()
+      .setClass("custom-image-auto-uploader-settings-tag")
+
+    new Setting(set)
+      .setName($("远端回收宽限期（小时）"))
+      .setDesc($("删除图片后，延迟多久再检查并移动到远端 .trash，默认 24 小时"))
+      .addText((text) =>
+        text.setValue((this.plugin.settings.remoteTrashGraceMs / (60 * 60 * 1000)).toString()).onChange(async (value) => {
+          const hours = Number(value)
+          if (!Number.isNaN(hours) && hours > 0) {
+            this.plugin.settings.remoteTrashGraceMs = Math.round(hours * 60 * 60 * 1000)
+            await this.plugin.saveSettings()
+          }
+        })
+      )
+
+    new Setting(set)
+      .setName($("远端回收历史保留（天）"))
+      .setDesc($("已完成、已取消和失败的回收任务保留多久，默认 7 天"))
+      .addText((text) =>
+        text.setValue((this.plugin.settings.remoteTrashHistoryRetentionMs / (24 * 60 * 60 * 1000)).toString()).onChange(async (value) => {
+          const days = Number(value)
+          if (!Number.isNaN(days) && days > 0) {
+            this.plugin.settings.remoteTrashHistoryRetentionMs = Math.round(days * 24 * 60 * 60 * 1000)
+            await this.plugin.saveSettings()
+          }
+        })
+      )
+
+    new Setting(set)
+      .setName($("远端回收检查间隔（分钟）"))
+      .setDesc($("插件轮询待回收任务的时间间隔，默认 5 分钟"))
+      .addText((text) =>
+        text.setValue((this.plugin.settings.remoteTrashPollIntervalMs / (60 * 1000)).toString()).onChange(async (value) => {
+          const minutes = Number(value)
+          if (!Number.isNaN(minutes) && minutes > 0) {
+            this.plugin.settings.remoteTrashPollIntervalMs = Math.round(minutes * 60 * 1000)
+            await this.plugin.saveSettings()
+          }
+        })
       )
 
     new Setting(set)

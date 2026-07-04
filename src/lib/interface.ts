@@ -23,3 +23,21 @@ export interface UploadTask {
   imageFile: TFile // 图片路径
   metadataItem?: Metadata
 }
+
+export type RemoteTrashTaskStatus = "pending" | "completed" | "cancelled" | "failed"
+
+export interface RemoteTrashTask {
+  id: string
+  imageUrl: string
+  notePath: string
+  createdAt: number
+  graceUntil: number
+  status: RemoteTrashTaskStatus
+  lastError: string
+  finishedAt: number | null
+}
+
+export interface RemoteTrashTaskStore {
+  pendingTasks: RemoteTrashTask[]
+  historyTasks: RemoteTrashTask[]
+}

@@ -1,18 +1,40 @@
-import { Menu, Plugin, TFile, Notice, debounce } from "obsidian";
+import { Menu, Notice, Plugin, TFile, debounce } from "obsidian";
 
-import { imageDown, imageUpload, statusCheck, replaceInText, replaceInTextForUpload, replaceInTextForDownload, hasExcludeDomain, autoAddExcludeDomain, metadataCacheHandle, generateRandomString, showTaskNotice, showErrorNotice, getAttachmentUploadPath, setMenu } from "./lib/utils";
-import { SettingTab, PluginSettings, DEFAULT_SETTINGS } from "./setting";
-import { DownTask, UploadTask } from "./lib/interface";
+import {
+  autoAddExcludeDomain,
+  generateRandomString,
+  getAttachmentUploadPath,
+  hasExcludeDomain,
+  imageDown,
+  imageUpload,
+  metadataCacheHandle,
+  replaceInTextForDownload,
+  replaceInTextForUpload,
+  setMenu,
+  showErrorNotice,
+  showTaskNotice,
+  statusCheck,
+} from "./lib/utils";
+import { DownTask, RemoteTrashTask, RemoteTrashTaskStore, UploadTask } from "./lib/interface";
+import { DEFAULT_SETTINGS, PluginSettings, SettingTab } from "./setting";
 import { $ } from "./lang/lang";
 
+const wikilinkImageRegex = /!\[\[([^\]|]*)\|?([^\]]*)\]\]/g;
+const markdownImageRegex = /!\[([^\]]*)\]\((.*?)\s*("(?:.*[^"])")?\s*\)/g;
 
-//const mdImageRegex = /!\[([^\]]*)\][\(|\[](.*?)\s*("(?:.*[^"])")?\s*[\)|\]]|!\[\[([^\]]*)\]\]/g
-// @lqllife 增加支持 ![[image.png|alt]]
-// Wiki link format: ![[image.png|alt]]
-const wikilinkImageRegex = /!\[\[([^\]|]*)\|?([^\]]*)\]\]/g
-// Markdown format: ![alt](url)
-const markdownImageRegex = /!\[([^\]]*)\]\((.*?)\s*("(?:.*[^"])")?\s*\)/g
+interface PersistedPluginData {
+  settings: PluginSettings
+  remoteTrash: RemoteTrashTaskStore
+}
 
+const DEFAULT_REMOTE_TRASH_STORE: RemoteTrashTaskStore = {
+  pendingTasks: [],
+  historyTasks: [],
+};
+
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 export default class CustomImageAutoUploader extends Plugin {
   settingTab: SettingTab
@@ -20,39 +42,35 @@ export default class CustomImageAutoUploader extends Plugin {
   statusBar: HTMLElement[] = []
   downloadStatus: { current: number; total: number } = { current: 0, total: 0 }
   uploadStatus: { current: number; total: number } = { current: 0, total: 0 }
-  // 添加状态显示类型变量
   statusType: "download" | "upload" | "all" | "none" = "none"
   fromPluginSet = false
+  remoteTrashTasks: RemoteTrashTaskStore = structuredClone(DEFAULT_REMOTE_TRASH_STORE)
+  remoteTrashTimer: number | null = null
+  isProcessingRemoteTrashTasks = false
 
-  /**
-   * 重置任务状态并设置显示类型
-   * @param type 显示类型：'download' | 'upload' | 'all' | 'none'
-   * @param reset 是否重置计数，默认为 true
-   */
   resetStatus(type: "download" | "upload" | "all" | "none", reset: boolean = true): void {
-    // 设置显示类型
     this.statusType = type
 
-    // 重置计数
     if (reset) {
       this.downloadStatus = { current: 0, total: 0 }
       this.uploadStatus = { current: 0, total: 0 }
     }
 
-    // 更新状态栏显示
     statusCheck(this)
   }
 
   async onload() {
-    await this.loadSettings()
+    await this.loadPluginState()
 
     statusCheck(this)
 
     this.settingTab = new SettingTab(this.app, this)
-    // 注册设置选项
-    this.addSettingTab(this.settingTab);
+    this.addSettingTab(this.settingTab)
 
-    // 注册编译器事件
+    this.pruneRemoteTrashHistory()
+    await this.processPendingRemoteTrashTasks()
+    this.startRemoteTrashTaskPolling()
+
     const debouncedProcess = debounce(
       async () => {
         if (!this.fromPluginSet) {
@@ -65,9 +83,9 @@ export default class CustomImageAutoUploader extends Plugin {
       1000,
       true
     )
+
     this.registerEvent(this.app.workspace.on("editor-change", debouncedProcess))
 
-    // 注册命令
     this.addCommand({
       id: "down-current-images",
       name: $("下载当前笔记图片"),
@@ -110,11 +128,10 @@ export default class CustomImageAutoUploader extends Plugin {
       id: "delete-unreferenced-images",
       name: $("删除未引用图片（全库）"),
       callback: async () => {
-        await this.VaultDeleteUnreferencedImages();
+        await this.VaultDeleteUnreferencedImages()
       },
     })
 
-    // 注册菜单
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu: Menu) => {
         setMenu(menu, this, true, true)
@@ -131,6 +148,17 @@ export default class CustomImageAutoUploader extends Plugin {
       setMenu(menu, this, true)
       menu.showAtMouseEvent(event)
     })
+
+    this.registerDomEvent(document, "contextmenu", (event: MouseEvent) => {
+      this.handleImageContextMenu(event)
+    })
+  }
+
+  onunload() {
+    if (this.remoteTrashTimer !== null) {
+      window.clearInterval(this.remoteTrashTimer)
+      this.remoteTrashTimer = null
+    }
   }
 
   async ContentImageAutoHandle(isManual: boolean = false) {
@@ -156,8 +184,8 @@ export default class CustomImageAutoUploader extends Plugin {
   async ContentDownImage() {
     if (!this.app.workspace.activeEditor || !this.app.workspace.activeEditor.editor) return
 
-    let cursor = this.app.workspace.activeEditor.editor.getCursor()
-    let fileFullContent = this.app.workspace.activeEditor.editor.getValue() || ""
+    const cursor = this.app.workspace.activeEditor.editor.getCursor()
+    const fileFullContent = this.app.workspace.activeEditor.editor.getValue() || ""
     if (!fileFullContent) return
 
     let filePropertyContent = ""
@@ -178,24 +206,19 @@ export default class CustomImageAutoUploader extends Plugin {
       fileContent = fileFullContent
     }
 
-    // 第一次循环：收集任务并统计数量
     const downloadTasks: DownTask[] = []
-
-    // Download only supports Markdown format now: ![alt](url)
     const matches = fileContent.matchAll(markdownImageRegex)
     const uniqueTask = new Set<string>()
     for (const match of matches) {
       if (uniqueTask.has(match[0])) continue
       uniqueTask.add(match[0])
 
-      // match[2] is the URL
       if (!/^http/.test(match[2]) || hasExcludeDomain(match[2], this.settings.excludeDomains)) {
         continue
       }
 
-      // match[1]: alt, match[2]: url, match[3]: title
       let imageAlt = match[3] ? match[3] : match[1] ? match[1] : ""
-      imageAlt = imageAlt.replaceAll('"', "")
+      imageAlt = imageAlt.replaceAll("\"", "")
       downloadTasks.push({
         matchText: match[0],
         imageAlt,
@@ -206,7 +229,6 @@ export default class CustomImageAutoUploader extends Plugin {
       statusCheck(this)
     }
 
-    // 第二次循环：批量异步处理任务
     let isModify = false
     const downloadResults = await Promise.all(
       downloadTasks.map(async (task) => {
@@ -214,7 +236,7 @@ export default class CustomImageAutoUploader extends Plugin {
         return { task, result }
       })
     )
-    // 处理下载结果
+
     for (const { task, result } of downloadResults) {
       if (result.err) {
         showErrorNotice(result.msg)
@@ -228,10 +250,8 @@ export default class CustomImageAutoUploader extends Plugin {
 
     if (isModify) {
       this.fromPluginSet = true
-
       this.app.workspace.activeEditor?.editor?.setValue(filePropertyContent + fileContent)
       await this.app.workspace.activeEditor?.editor?.setCursor({ line: cursor.line - filePropertyContentEndLine, ch: 0 })
-
       this.fromPluginSet = false
     }
   }
@@ -239,19 +259,13 @@ export default class CustomImageAutoUploader extends Plugin {
   async ContentUploadImage() {
     if (!this.app.workspace.activeEditor || !this.app.workspace.activeEditor.editor) return
 
-    let cursor = this.app.workspace.activeEditor.editor.getCursor()
-
-    let fileFullContent = this.app.workspace.activeEditor.editor.getValue() || ""
+    const cursor = this.app.workspace.activeEditor.editor.getCursor()
+    const fileFullContent = this.app.workspace.activeEditor.editor.getValue() || ""
     if (!fileFullContent) return
 
     let filePropertyContent = ""
     let fileContent = ""
-
-    // 统一换行为 \n
-
-    // 仅匹配文件开头的 front matter（独立一行的 --- 开始和结束）
     const propertyMatch = fileFullContent.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/g)
-
 
     if (propertyMatch) {
       fileContent = fileFullContent.substring(propertyMatch[0].length)
@@ -260,26 +274,21 @@ export default class CustomImageAutoUploader extends Plugin {
       fileContent = fileFullContent
     }
 
-
-
     const uploadTasks: UploadTask[] = []
-    // Upload only supports Wikilink format now: ![[image.png]]
     const matches = fileContent.matchAll(wikilinkImageRegex)
     const uniqueTask = new Set<string>()
     for (const match of matches) {
       if (uniqueTask.has(match[0])) continue
       uniqueTask.add(match[0])
 
-      // match[1] is the file path/name
       if (/^http/.test(match[1])) {
         continue
       }
 
       const file = match[1]
-      let readfile = await getAttachmentUploadPath(file, this)
+      const readfile = await getAttachmentUploadPath(file, this)
       if (!readfile) continue
 
-      // match[2] is the alt
       const imageAlt = match[2] ? match[2] : file
       uploadTasks.push({
         matchText: match[0],
@@ -290,7 +299,6 @@ export default class CustomImageAutoUploader extends Plugin {
       statusCheck(this)
     }
 
-    // 第二次循环：批量异步处理任务
     let isModify = false
     const uploadResults = await Promise.all(
       uploadTasks.map(async (task) => {
@@ -298,7 +306,7 @@ export default class CustomImageAutoUploader extends Plugin {
         return { task, result }
       })
     )
-    // 处理上传结果
+
     for (const { task, result } of uploadResults) {
       if (result.err) {
         showErrorNotice(result.msg)
@@ -315,18 +323,12 @@ export default class CustomImageAutoUploader extends Plugin {
 
     if (isModify) {
       this.fromPluginSet = true
-
       this.app.workspace.activeEditor?.editor?.setValue(filePropertyContent + fileContent)
       await this.app.workspace.activeEditor?.editor?.setCursor(cursor)
-
       this.fromPluginSet = false
     }
   }
 
-  /**
-   * 处理当前活动文件中的元数据图片下载任务
-   * @param isWorkspace - 是否处理工作区中的所有文件，默认为 false
-   */
   async MetadataDownImage() {
     if (this.settings.propertyNeedSets.length === 0) {
       return
@@ -337,7 +339,6 @@ export default class CustomImageAutoUploader extends Plugin {
     const cachedMetadata = this.app.metadataCache.getFileCache(activeFile)
     if (!cachedMetadata) return
 
-    // 第一次循环：收集任务并统计数量
     const downloadTasks: DownTask[] = []
     const metadata = metadataCacheHandle(cachedMetadata, this)
     for (const item of metadata) {
@@ -356,7 +357,6 @@ export default class CustomImageAutoUploader extends Plugin {
       }
     }
 
-    // 第二次循环：批量异步处理任务
     let isModify = false
     const downloadResults = await Promise.all(
       downloadTasks.map(async (task) => {
@@ -365,7 +365,6 @@ export default class CustomImageAutoUploader extends Plugin {
       })
     )
 
-    // 处理下载结果
     for (const { task, result } of downloadResults) {
       if (result.err) {
         showErrorNotice(result.msg)
@@ -387,7 +386,7 @@ export default class CustomImageAutoUploader extends Plugin {
           frontmatter[item.key] = item.type === "string" ? item.value[0] : item.value
         }
       })
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.fromPluginSet = false
       }, 1000)
     }
@@ -403,7 +402,6 @@ export default class CustomImageAutoUploader extends Plugin {
     const cachedMetadata = this.app.metadataCache.getFileCache(activeFile)
     if (!cachedMetadata) return
 
-    // 第一次循环：收集任务并统计数量
     const uploadTasks: UploadTask[] = []
     const metadata = metadataCacheHandle(cachedMetadata, this)
     for (const item of metadata) {
@@ -411,10 +409,8 @@ export default class CustomImageAutoUploader extends Plugin {
         if (/^http/.test(pic)) {
           continue
         }
-        let readfile = await getAttachmentUploadPath(pic, this)
-        if (!readfile) continue
-
-        if (!item.params) continue
+        const readfile = await getAttachmentUploadPath(pic, this)
+        if (!readfile || !item.params) continue
 
         uploadTasks.push({
           matchText: pic,
@@ -427,7 +423,7 @@ export default class CustomImageAutoUploader extends Plugin {
         statusCheck(this)
       }
     }
-    // 第二次循环：批量异步处理任务
+
     let isModify = false
     const uploadResults = await Promise.all(
       uploadTasks.map(async (task) => {
@@ -436,7 +432,6 @@ export default class CustomImageAutoUploader extends Plugin {
       })
     )
 
-    // 处理上传结果
     for (const { task, result } of uploadResults) {
       if (result.err) {
         showErrorNotice(result.msg)
@@ -459,13 +454,11 @@ export default class CustomImageAutoUploader extends Plugin {
           frontmatter[item.key] = item.type === "string" ? item.value[0] : item.value
         }
       })
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.fromPluginSet = false
       }, 1000)
     }
   }
-
-  onunload() { }
 
   async VaultDownImage() {
     this.fromPluginSet = true
@@ -474,7 +467,6 @@ export default class CustomImageAutoUploader extends Plugin {
       this.downloadStatus.total = 0
       this.downloadStatus.current = 0
 
-      // First pass: collect tasks from all files
       const tasks: { file: TFile; downloadTasks: DownTask[] }[] = []
 
       for (const file of files) {
@@ -487,7 +479,7 @@ export default class CustomImageAutoUploader extends Plugin {
             continue
           }
           let imageAlt = match[3] ? match[3] : match[1] ? match[1] : ""
-          imageAlt = imageAlt.replaceAll('"', "")
+          imageAlt = imageAlt.replaceAll("\"", "")
           fileTasks.push({
             matchText: match[0],
             imageAlt,
@@ -528,7 +520,7 @@ export default class CustomImageAutoUploader extends Plugin {
         }
       }
     } finally {
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.fromPluginSet = false
       }, 1500)
     }
@@ -541,7 +533,6 @@ export default class CustomImageAutoUploader extends Plugin {
       this.uploadStatus.total = 0
       this.uploadStatus.current = 0
 
-      // First pass: collect tasks
       const tasks: { file: TFile; uploadTasks: UploadTask[] }[] = []
 
       for (const file of files) {
@@ -554,7 +545,7 @@ export default class CustomImageAutoUploader extends Plugin {
             continue
           }
           const linkFile = match[1]
-          let readfile = await getAttachmentUploadPath(linkFile, this)
+          const readfile = await getAttachmentUploadPath(linkFile, this)
           if (!readfile) continue
 
           const imageAlt = match[2] ? match[2] : linkFile
@@ -571,7 +562,6 @@ export default class CustomImageAutoUploader extends Plugin {
           tasks.push({ file, uploadTasks: fileTasks })
         }
       }
-
 
       for (const item of tasks) {
         let fileContent = await this.app.vault.read(item.file)
@@ -602,39 +592,34 @@ export default class CustomImageAutoUploader extends Plugin {
         }
       }
     } finally {
-      setTimeout(() => {
+      window.setTimeout(() => {
         this.fromPluginSet = false
       }, 1500)
     }
   }
 
   async VaultDeleteUnreferencedImages() {
-    // 1. 获取所有通过 Markdown 链接引用的图片
-    const resolvedLinks = this.app.metadataCache.resolvedLinks;
-    const referencedFiles = new Set<string>();
+    const resolvedLinks = this.app.metadataCache.resolvedLinks
+    const referencedFiles = new Set<string>()
 
-    // 遍历所有文档的链接
     for (const sourcePath in resolvedLinks) {
-      const links = resolvedLinks[sourcePath];
+      const links = resolvedLinks[sourcePath]
       for (const targetPath in links) {
-        referencedFiles.add(targetPath);
+        referencedFiles.add(targetPath)
       }
     }
 
-    // 2. 获取所有通过 Frontmatter 引用的图片
-    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const markdownFiles = this.app.vault.getMarkdownFiles()
     for (const file of markdownFiles) {
-      const cache = this.app.metadataCache.getFileCache(file);
+      const cache = this.app.metadataCache.getFileCache(file)
       if (cache) {
-        const metadata = metadataCacheHandle(cache, this);
+        const metadata = metadataCacheHandle(cache, this)
         for (const item of metadata) {
-          // item.value 是 string[]
           for (const val of item.value) {
             if (!/^http/.test(val)) {
-              // 尝试解析文件路径
-              const targetFile = this.app.metadataCache.getFirstLinkpathDest(val, file.path);
+              const targetFile = this.app.metadataCache.getFirstLinkpathDest(val, file.path)
               if (targetFile) {
-                referencedFiles.add(targetFile.path);
+                referencedFiles.add(targetFile.path)
               }
             }
           }
@@ -642,48 +627,355 @@ export default class CustomImageAutoUploader extends Plugin {
       }
     }
 
-    // 3. 扫描所有图片文件
-    const allFiles = this.app.vault.getFiles();
-    const imageFiles = allFiles.filter(file => {
-      // 简单的图片扩展名检查，可以复用 IMAGE_EXTENSIONS 但需要从 utils 导入或在此处定义
-      // 这里使用 file-type 库检查的扩展名列表的一个子集或常见图片格式
-      const ext = file.extension.toLowerCase();
-      return ["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif"].includes(ext);
-    });
+    const imageFiles = this.app.vault.getFiles().filter((file) => {
+      const ext = file.extension.toLowerCase()
+      return ["png", "jpg", "jpeg", "gif", "bmp", "svg", "webp", "avif"].includes(ext)
+    })
 
-    let deletedCount = 0;
-    const unreferencedFiles: TFile[] = [];
+    let deletedCount = 0
+    const unreferencedFiles: TFile[] = []
 
     for (const file of imageFiles) {
       if (!referencedFiles.has(file.path)) {
-        unreferencedFiles.push(file);
+        unreferencedFiles.push(file)
       }
     }
 
     if (unreferencedFiles.length === 0) {
-      new Notice($("未发现未引用图片"));
-      return;
+      new Notice($("未发现未引用图片"))
+      return
     }
-
-    // 这里可以增加一个确认弹窗，但根据 requirement "一键删除"，直接删除（移入回收站）
-    // 为了安全，还是建议先 Notice 告知
 
     for (const file of unreferencedFiles) {
-      await this.app.fileManager.trashFile(file);
-      deletedCount++;
+      await this.app.fileManager.trashFile(file)
+      deletedCount++
     }
 
-    new Notice($("已删除 ${count} 张未引用图片", { count: deletedCount }));
+    new Notice($("已删除 ${count} 张未引用图片", { count: deletedCount }))
   }
 
-  async loadSettings() {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData())
+  async loadPluginState() {
+    const raw = await this.loadData()
+
+    if (raw && typeof raw === "object" && "settings" in raw) {
+      const data = raw as Partial<PersistedPluginData>
+      this.settings = Object.assign({}, DEFAULT_SETTINGS, data.settings ?? {})
+      this.remoteTrashTasks = {
+        pendingTasks: data.remoteTrash?.pendingTasks ?? [],
+        historyTasks: data.remoteTrash?.historyTasks ?? [],
+      }
+      return
+    }
+
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {})
+    this.remoteTrashTasks = structuredClone(DEFAULT_REMOTE_TRASH_STORE)
   }
 
   async saveSettings(isStatusCheck: boolean = true) {
-    await this.saveData(this.settings)
+    await this.savePluginState()
+    this.startRemoteTrashTaskPolling()
     if (isStatusCheck) {
       this.resetStatus("none")
     }
+  }
+
+  async savePluginState() {
+    await this.saveData({
+      settings: this.settings,
+      remoteTrash: this.remoteTrashTasks,
+    } satisfies PersistedPluginData)
+  }
+
+  startRemoteTrashTaskPolling() {
+    if (this.remoteTrashTimer !== null) {
+      window.clearInterval(this.remoteTrashTimer)
+    }
+
+    this.remoteTrashTimer = window.setInterval(() => {
+      void this.processPendingRemoteTrashTasks()
+    }, this.settings.remoteTrashPollIntervalMs)
+  }
+
+  handleImageContextMenu(event: MouseEvent) {
+    const target = event.target
+    if (!(target instanceof HTMLElement)) return
+
+    const imageElement = target.closest("img")
+    if (!(imageElement instanceof HTMLImageElement)) return
+
+    const imageUrl = this.normalizeRemoteImageUrl(imageElement.currentSrc || imageElement.src)
+    if (!this.canHandleRemoteImageContextMenu(imageElement, imageUrl)) return
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    const menu = new Menu()
+    menu.addItem((item) => {
+      item
+        .setIcon("trash")
+        .setTitle($("删除图片并延迟移到远端回收站"))
+        .onClick(async () => {
+          await this.deleteRemoteImageFromCurrentNote(imageUrl)
+        })
+    })
+    menu.showAtMouseEvent(event)
+  }
+
+  canHandleRemoteImageContextMenu(imageElement: HTMLImageElement, imageUrl: string): boolean {
+    if (!imageUrl.startsWith("http://") && !imageUrl.startsWith("https://")) {
+      return false
+    }
+
+    const activeFile = this.app.workspace.getActiveFile()
+    if (!(activeFile instanceof TFile) || activeFile.extension !== "md") {
+      return false
+    }
+
+    const sourceViewContainer = imageElement.closest(".markdown-source-view, .cm-content")
+    const readingViewContainer = imageElement.closest(".markdown-preview-view, .markdown-reading-view")
+    return sourceViewContainer !== null || readingViewContainer !== null
+  }
+
+  async deleteRemoteImageFromCurrentNote(imageUrl: string) {
+    const activeFile = this.app.workspace.getActiveFile()
+    if (!(activeFile instanceof TFile)) {
+      new Notice($("当前图片引用删除失败"))
+      return
+    }
+
+    const removed = await this.removeRemoteImageReferenceFromFile(activeFile, imageUrl)
+    if (!removed) {
+      new Notice($("未找到当前笔记中的图片引用"))
+      return
+    }
+
+    await this.enqueueRemoteTrashTask(imageUrl, activeFile.path)
+    new Notice($("已创建远端回收任务，图片将在宽限期后检查并移入 .trash"))
+  }
+
+  async removeRemoteImageReferenceFromFile(file: TFile, imageUrl: string): Promise<boolean> {
+    const content = await this.app.vault.read(file)
+    let removed = false
+    const updatedContent = content.replace(markdownImageRegex, (match, altText, url, title) => {
+      if (!removed && this.normalizeRemoteImageUrl(url) === imageUrl) {
+        removed = true
+        return ""
+      }
+      return match
+    })
+
+    if (!removed) {
+      return false
+    }
+
+    const normalizedContent = updatedContent.replace(/\n{3,}/g, "\n\n")
+    const activeFile = this.app.workspace.getActiveFile()
+    const activeEditor = this.app.workspace.activeEditor?.editor
+
+    if (activeFile?.path === file.path && activeEditor) {
+      this.fromPluginSet = true
+      activeEditor.setValue(normalizedContent)
+      this.fromPluginSet = false
+      return true
+    }
+
+    await this.app.vault.modify(file, normalizedContent)
+    return true
+  }
+
+  async enqueueRemoteTrashTask(imageUrl: string, notePath: string) {
+    const now = Date.now()
+    const existingTask = this.remoteTrashTasks.pendingTasks.find((task) => task.imageUrl === imageUrl)
+
+    if (existingTask) {
+      existingTask.notePath = notePath
+      existingTask.createdAt = now
+      existingTask.graceUntil = now + this.settings.remoteTrashGraceMs
+      existingTask.lastError = ""
+    } else {
+      this.remoteTrashTasks.pendingTasks.push({
+        id: this.createTaskId(),
+        imageUrl,
+        notePath,
+        createdAt: now,
+        graceUntil: now + this.settings.remoteTrashGraceMs,
+        status: "pending",
+        lastError: "",
+        finishedAt: null,
+      })
+    }
+
+    await this.savePluginState()
+  }
+
+  async processPendingRemoteTrashTasks() {
+    if (this.isProcessingRemoteTrashTasks) {
+      return
+    }
+
+    this.isProcessingRemoteTrashTasks = true
+    try {
+      const now = Date.now()
+      const remainingTasks: RemoteTrashTask[] = []
+
+      for (const task of this.remoteTrashTasks.pendingTasks) {
+        if (task.graceUntil > now) {
+          remainingTasks.push(task)
+          continue
+        }
+
+        const isStillReferenced = await this.isRemoteImageReferencedInVault(task.imageUrl)
+        if (isStillReferenced) {
+          this.pushRemoteTrashHistory({
+            ...task,
+            status: "cancelled",
+            finishedAt: Date.now(),
+            lastError: "",
+          })
+          new Notice($("远端回收任务已取消，图片仍被引用"))
+          continue
+        }
+
+        const trashResult = await this.requestRemoteTrash(task.imageUrl)
+        if (trashResult.ok) {
+          this.pushRemoteTrashHistory({
+            ...task,
+            status: "completed",
+            finishedAt: Date.now(),
+            lastError: "",
+          })
+          new Notice($("远端图片已移入回收站"))
+        } else {
+          this.pushRemoteTrashHistory({
+            ...task,
+            status: "failed",
+            finishedAt: Date.now(),
+            lastError: trashResult.error,
+          })
+          new Notice($("远端回收失败:") + trashResult.error)
+        }
+      }
+
+      this.remoteTrashTasks.pendingTasks = remainingTasks
+      this.pruneRemoteTrashHistory()
+      await this.savePluginState()
+    } finally {
+      this.isProcessingRemoteTrashTasks = false
+    }
+  }
+
+  pushRemoteTrashHistory(task: RemoteTrashTask) {
+    this.remoteTrashTasks.historyTasks.push(task)
+  }
+
+  pruneRemoteTrashHistory() {
+    const cutoff = Date.now() - this.settings.remoteTrashHistoryRetentionMs
+    this.remoteTrashTasks.historyTasks = this.remoteTrashTasks.historyTasks.filter((task) => {
+      return task.finishedAt === null || task.finishedAt >= cutoff
+    })
+  }
+
+  async isRemoteImageReferencedInVault(imageUrl: string): Promise<boolean> {
+    const markdownFiles = this.app.vault.getMarkdownFiles()
+
+    for (const file of markdownFiles) {
+      const content = await this.app.vault.read(file)
+      const markdownMatches = content.matchAll(markdownImageRegex)
+      for (const match of markdownMatches) {
+        if (this.normalizeRemoteImageUrl(match[2]) === imageUrl) {
+          return true
+        }
+      }
+
+      const cache = this.app.metadataCache.getFileCache(file)
+      if (!cache) continue
+
+      const metadata = metadataCacheHandle(cache, this)
+      for (const item of metadata) {
+        for (const value of item.value) {
+          if (/^https?:\/\//i.test(value) && this.normalizeRemoteImageUrl(value) === imageUrl) {
+            return true
+          }
+        }
+      }
+    }
+
+    return false
+  }
+
+  async requestRemoteTrash(imageUrl: string): Promise<{ ok: boolean; error: string }> {
+    const apiUrl = this.buildRemoteTrashApiUrl()
+    const headers = new Headers({ "Content-Type": "application/json" })
+    if (this.settings.apiToken !== "") {
+      headers.set("Authorization", this.settings.apiToken)
+    }
+
+    const body: Record<string, string> = { imageUrl }
+    if (this.settings.uploadConfigId.trim() !== "") {
+      body.id = this.settings.uploadConfigId.trim()
+    }
+
+    try {
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      })
+
+      const rawText = await response.text()
+      let result: { status?: boolean; message?: string; details?: string | string[] } = {}
+      try {
+        result = rawText ? JSON.parse(rawText) : {}
+      } catch {
+        result = { message: rawText }
+      }
+
+      if (!response.ok || result.status === false) {
+        const detailsText = Array.isArray(result.details) ? result.details.join(",") : (result.details ?? "")
+        return {
+          ok: false,
+          error: `${result.message ?? response.statusText}${detailsText ? ` ${detailsText}` : ""}`.trim(),
+        }
+      }
+
+      return { ok: true, error: "" }
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : $("网络错误,请检查网络是否通畅"),
+      }
+    }
+  }
+
+  buildRemoteTrashApiUrl(): string {
+    const apiUrl = new URL(this.settings.api)
+    const pathname = apiUrl.pathname.replace(/\/+$/, "")
+
+    if (pathname.endsWith("/user/upload")) {
+      apiUrl.pathname = pathname.replace(/\/user\/upload$/, "/user/image/trash")
+    } else if (pathname.endsWith("/upload")) {
+      apiUrl.pathname = pathname.replace(/\/upload$/, "/image/trash")
+    } else {
+      apiUrl.pathname = `${pathname}/image/trash`
+    }
+
+    apiUrl.search = ""
+    apiUrl.hash = ""
+    return apiUrl.toString()
+  }
+
+  normalizeRemoteImageUrl(imageUrl: string): string {
+    try {
+      const url = new URL(imageUrl)
+      url.hash = ""
+      url.search = ""
+      return url.toString()
+    } catch {
+      return imageUrl.trim()
+    }
+  }
+
+  createTaskId(): string {
+    return `remote-trash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   }
 }

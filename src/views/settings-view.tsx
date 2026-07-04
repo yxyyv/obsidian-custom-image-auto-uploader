@@ -12,12 +12,12 @@ async function getClipboardContent(plugin: CustomImageAutoUploader): Promise<voi
     plugin.settings.uploadConfigId = uploadConfigId
     plugin.settings.clipboardReadTip = clipboardReadTip
 
-    await plugin.saveData(plugin.settings)
+    await plugin.saveSettings()
     plugin.settingTab.display()
 
     setTimeout(() => {
       plugin.settings.clipboardReadTip = ""
-      plugin.saveData(plugin.settings)
+      plugin.saveSettings()
     }, 2000)
   }
 
@@ -25,12 +25,12 @@ async function getClipboardContent(plugin: CustomImageAutoUploader): Promise<voi
   const clipboardReadTipTipSave = async (clipboardReadTip: string) => {
     plugin.settings.clipboardReadTip = clipboardReadTip
 
-    await plugin.saveData(plugin.settings)
+    await plugin.saveSettings()
     plugin.settingTab.display()
 
     setTimeout(() => {
       plugin.settings.clipboardReadTip = ""
-      plugin.saveData(plugin.settings)
+      plugin.saveSettings()
     }, 2000)
   }
 
@@ -173,7 +173,7 @@ export const ContentSet = ({ plugin }: { plugin: CustomImageAutoUploader }) => {
 
   const save = async () => {
     plugin.settings.contentSet = contentSet
-    await plugin.saveData(plugin.settings)
+    await plugin.saveSettings()
   }
 
   const ImageSvrProcessModeEntries = Object.entries(ImageSvrProcessMode)
@@ -262,7 +262,7 @@ export const PropertyNeedSet = ({ plugin, frontMatterProperties }: { plugin: Cus
 
   const save = async () => {
     plugin.settings.propertyNeedSets = propertyNeedSets
-    await plugin.saveData(plugin.settings)
+    await plugin.saveSettings()
   }
 
   const ImageSvrProcessModeEntries = Object.entries(ImageSvrProcessMode)
