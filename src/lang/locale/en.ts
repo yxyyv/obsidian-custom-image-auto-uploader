@@ -114,6 +114,8 @@ export default <LangMap>{
   "已删除 ${count} 张未引用图片": "Deleted ${count} unreferenced images",
   "删除当前图片": "Delete current image",
   "已创建远端回收任务，图片将在宽限期后检查并移入 .trash": "A remote trash task has been created. The image will be checked after the grace period and moved to .trash",
+  "仅删除当前笔记引用，未创建远端回收任务，因为图片仍被其他位置引用": "Only the current note reference was removed. No remote trash task was created because the image is still referenced elsewhere",
+  "检测到图片引用已恢复，远端回收任务已取消": "The image reference was restored, so the remote trash task has been cancelled",
   "当前图片引用删除失败": "Failed to delete the current image reference",
   "当前图片不是受支持的远端图片": "The current image is not a supported remote image",
   "未找到当前笔记中的图片引用": "Could not find the image reference in the current note",

@@ -1,4 +1,4 @@
-import { Menu, Notice, Plugin, TFile, debounce } from "obsidian";
+import { MarkdownView, Menu, Notice, Plugin, TFile, debounce } from "obsidian";
 
 import {
   autoAddExcludeDomain,
@@ -25,6 +25,20 @@ const markdownImageRegex = /!\[([^\]]*)\]\((.*?)\s*("(?:.*[^"])")?\s*\)/g;
 interface PersistedPluginData {
   settings: PluginSettings
   remoteTrash: RemoteTrashTaskStore
+}
+
+interface RemoveRemoteImageReferenceResult {
+  removed: boolean
+  normalizedContent: string
+}
+
+interface RemoteImageReferenceSearchOptions {
+  contentOverrides?: Record<string, string>
+}
+
+interface RemoteImageReferenceLocation {
+  filePath: string
+  kind: "markdown" | "metadata"
 }
 
 const DEFAULT_REMOTE_TRASH_STORE: RemoteTrashTaskStore = {
@@ -79,6 +93,7 @@ export default class CustomImageAutoUploader extends Plugin {
           await this.MetadataImageAutoHandle()
           showTaskNotice(this, "all")
         }
+        await this.reconcilePendingRemoteTrashTasks()
       },
       1000,
       true
@@ -732,9 +747,22 @@ export default class CustomImageAutoUploader extends Plugin {
       return
     }
 
-    const removed = await this.removeRemoteImageReferenceFromFile(activeFile, imageUrl)
-    if (!removed) {
+    const removalResult = await this.removeRemoteImageReferenceFromFile(activeFile, imageUrl)
+    if (!removalResult.removed) {
       new Notice($("未找到当前笔记中的图片引用"))
+      return
+    }
+
+    const openEditorOverrides = this.getOpenEditorMarkdownOverrides()
+    const contentOverrides = {
+      ...openEditorOverrides,
+      [activeFile.path]: removalResult.normalizedContent,
+    }
+
+    const isStillReferenced = await this.isRemoteImageReferencedInVault(imageUrl, { contentOverrides })
+    if (isStillReferenced) {
+      await this.cancelPendingRemoteTrashTask(imageUrl)
+      new Notice($("仅删除当前笔记引用，未创建远端回收任务，因为图片仍被其他位置引用"))
       return
     }
 
@@ -742,8 +770,28 @@ export default class CustomImageAutoUploader extends Plugin {
     new Notice($("已创建远端回收任务，图片将在宽限期后检查并移入 .trash"))
   }
 
-  async removeRemoteImageReferenceFromFile(file: TFile, imageUrl: string): Promise<boolean> {
-    const content = await this.app.vault.read(file)
+  async removeRemoteImageReferenceFromFile(file: TFile, imageUrl: string): Promise<RemoveRemoteImageReferenceResult> {
+    const content = this.getOpenEditorMarkdownOverrides()[file.path] ?? await this.app.vault.read(file)
+    const removalResult = this.removeRemoteImageReferenceFromMarkdown(content, imageUrl)
+    if (!removalResult.removed) {
+      return removalResult
+    }
+
+    const activeFile = this.app.workspace.getActiveFile()
+    const activeEditor = this.app.workspace.activeEditor?.editor
+
+    if (activeFile?.path === file.path && activeEditor) {
+      this.fromPluginSet = true
+      activeEditor.setValue(removalResult.normalizedContent)
+      this.fromPluginSet = false
+      return removalResult
+    }
+
+    await this.app.vault.modify(file, removalResult.normalizedContent)
+    return removalResult
+  }
+
+  removeRemoteImageReferenceFromMarkdown(content: string, imageUrl: string): RemoveRemoteImageReferenceResult {
     let removed = false
     const updatedContent = content.replace(markdownImageRegex, (match, altText, url, title) => {
       if (!removed && this.normalizeRemoteImageUrl(url) === imageUrl) {
@@ -753,23 +801,10 @@ export default class CustomImageAutoUploader extends Plugin {
       return match
     })
 
-    if (!removed) {
-      return false
+    return {
+      removed,
+      normalizedContent: removed ? updatedContent.replace(/\n{3,}/g, "\n\n") : content,
     }
-
-    const normalizedContent = updatedContent.replace(/\n{3,}/g, "\n\n")
-    const activeFile = this.app.workspace.getActiveFile()
-    const activeEditor = this.app.workspace.activeEditor?.editor
-
-    if (activeFile?.path === file.path && activeEditor) {
-      this.fromPluginSet = true
-      activeEditor.setValue(normalizedContent)
-      this.fromPluginSet = false
-      return true
-    }
-
-    await this.app.vault.modify(file, normalizedContent)
-    return true
   }
 
   async enqueueRemoteTrashTask(imageUrl: string, notePath: string) {
@@ -797,6 +832,71 @@ export default class CustomImageAutoUploader extends Plugin {
     await this.savePluginState()
   }
 
+  async reconcilePendingRemoteTrashTasks() {
+    if (this.remoteTrashTasks.pendingTasks.length === 0) {
+      return
+    }
+
+    const contentOverrides = this.getOpenEditorMarkdownOverrides()
+    const cancelledUrls: string[] = []
+
+    for (const task of this.remoteTrashTasks.pendingTasks) {
+      const isStillReferenced = await this.isRemoteImageReferencedInVault(task.imageUrl, { contentOverrides })
+      if (isStillReferenced) {
+        cancelledUrls.push(task.imageUrl)
+      }
+    }
+
+    if (cancelledUrls.length === 0) {
+      return
+    }
+
+    let changed = false
+    for (const imageUrl of cancelledUrls) {
+      const cancelled = this.cancelPendingRemoteTrashTaskInternal(imageUrl)
+      changed = changed || cancelled
+    }
+
+    if (!changed) {
+      return
+    }
+
+    this.pruneRemoteTrashHistory()
+    await this.savePluginState()
+    new Notice($("检测到图片引用已恢复，远端回收任务已取消"))
+  }
+
+  async cancelPendingRemoteTrashTask(imageUrl: string, noticeMessage?: string): Promise<boolean> {
+    const cancelled = this.cancelPendingRemoteTrashTaskInternal(imageUrl)
+    if (!cancelled) {
+      return false
+    }
+
+    this.pruneRemoteTrashHistory()
+    await this.savePluginState()
+    if (noticeMessage) {
+      new Notice(noticeMessage)
+    }
+    return true
+  }
+
+  cancelPendingRemoteTrashTaskInternal(imageUrl: string): boolean {
+    const targetUrl = this.normalizeRemoteImageUrl(imageUrl)
+    const pendingTask = this.remoteTrashTasks.pendingTasks.find((task) => task.imageUrl === targetUrl)
+    if (!pendingTask) {
+      return false
+    }
+
+    this.remoteTrashTasks.pendingTasks = this.remoteTrashTasks.pendingTasks.filter((task) => task.imageUrl !== targetUrl)
+    this.pushRemoteTrashHistory({
+      ...pendingTask,
+      status: "cancelled",
+      finishedAt: Date.now(),
+      lastError: "",
+    })
+    return true
+  }
+
   async processPendingRemoteTrashTasks() {
     if (this.isProcessingRemoteTrashTasks) {
       return
@@ -806,14 +906,10 @@ export default class CustomImageAutoUploader extends Plugin {
     try {
       const now = Date.now()
       const remainingTasks: RemoteTrashTask[] = []
+      const contentOverrides = this.getOpenEditorMarkdownOverrides()
 
       for (const task of this.remoteTrashTasks.pendingTasks) {
-        if (task.graceUntil > now) {
-          remainingTasks.push(task)
-          continue
-        }
-
-        const isStillReferenced = await this.isRemoteImageReferencedInVault(task.imageUrl)
+        const isStillReferenced = await this.isRemoteImageReferencedInVault(task.imageUrl, { contentOverrides })
         if (isStillReferenced) {
           this.pushRemoteTrashHistory({
             ...task,
@@ -822,6 +918,11 @@ export default class CustomImageAutoUploader extends Plugin {
             lastError: "",
           })
           new Notice($("远端回收任务已取消，图片仍被引用"))
+          continue
+        }
+
+        if (task.graceUntil > now) {
+          remainingTasks.push(task)
           continue
         }
 
@@ -864,16 +965,36 @@ export default class CustomImageAutoUploader extends Plugin {
     })
   }
 
-  async isRemoteImageReferencedInVault(imageUrl: string): Promise<boolean> {
+  async isRemoteImageReferencedInVault(imageUrl: string, options?: RemoteImageReferenceSearchOptions): Promise<boolean> {
+    const locations = await this.getRemoteImageReferenceLocations(imageUrl, options)
+    return locations.length > 0
+  }
+
+  async getRemoteImageReferenceLocations(imageUrl: string, options?: RemoteImageReferenceSearchOptions): Promise<RemoteImageReferenceLocation[]> {
     const markdownFiles = this.app.vault.getMarkdownFiles()
+    const normalizedImageUrl = this.normalizeRemoteImageUrl(imageUrl)
+    const contentOverrides = options?.contentOverrides ?? {}
+    const locations: RemoteImageReferenceLocation[] = []
 
     for (const file of markdownFiles) {
-      const content = await this.app.vault.read(file)
+      const hasContentOverride = Object.prototype.hasOwnProperty.call(contentOverrides, file.path)
+      const content = hasContentOverride ? contentOverrides[file.path] : await this.app.vault.read(file)
       const markdownMatches = content.matchAll(markdownImageRegex)
       for (const match of markdownMatches) {
-        if (this.normalizeRemoteImageUrl(match[2]) === imageUrl) {
-          return true
+        if (this.normalizeRemoteImageUrl(match[2]) === normalizedImageUrl) {
+          locations.push({ filePath: file.path, kind: "markdown" })
+          break
         }
+      }
+
+      const frontmatterValues = this.extractRemoteImageUrlsFromFrontmatter(content)
+      if (frontmatterValues.some((value) => this.normalizeRemoteImageUrl(value) === normalizedImageUrl)) {
+        locations.push({ filePath: file.path, kind: "metadata" })
+        continue
+      }
+
+      if (hasContentOverride) {
+        continue
       }
 
       const cache = this.app.metadataCache.getFileCache(file)
@@ -882,14 +1003,114 @@ export default class CustomImageAutoUploader extends Plugin {
       const metadata = metadataCacheHandle(cache, this)
       for (const item of metadata) {
         for (const value of item.value) {
-          if (/^https?:\/\//i.test(value) && this.normalizeRemoteImageUrl(value) === imageUrl) {
-            return true
+          if (/^https?:\/\//i.test(value) && this.normalizeRemoteImageUrl(value) === normalizedImageUrl) {
+            locations.push({ filePath: file.path, kind: "metadata" })
+            break
           }
         }
       }
     }
 
-    return false
+    return locations
+  }
+
+  getOpenEditorMarkdownOverrides(): Record<string, string> {
+    const overrides: Record<string, string> = {}
+
+    for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+      if (!(leaf.view instanceof MarkdownView)) {
+        continue
+      }
+
+      const file = leaf.view.file
+      const editor = leaf.view.editor
+      if (!(file instanceof TFile) || file.extension !== "md" || !editor) {
+        continue
+      }
+
+      overrides[file.path] = editor.getValue()
+    }
+
+    return overrides
+  }
+
+  extractRemoteImageUrlsFromFrontmatter(content: string): string[] {
+    const frontmatter = this.extractFrontmatterBlock(content)
+    if (!frontmatter) {
+      return []
+    }
+
+    const wantedKeys = new Set(this.settings.propertyNeedSets.map((item) => item.key))
+    if (wantedKeys.size === 0) {
+      return []
+    }
+
+    const lines = frontmatter.split("\n")
+    const values: string[] = []
+
+    for (let index = 0; index < lines.length; index++) {
+      const line = lines[index]
+      const keyMatch = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(line)
+      if (!keyMatch) {
+        continue
+      }
+
+      const [, key, rawValue] = keyMatch
+      if (!wantedKeys.has(key)) {
+        continue
+      }
+
+      if (rawValue.trim() !== "") {
+        values.push(...this.extractRemoteImageUrlsFromYamlValue(rawValue))
+        continue
+      }
+
+      const listValues: string[] = []
+      for (let nestedIndex = index + 1; nestedIndex < lines.length; nestedIndex++) {
+        const nestedLine = lines[nestedIndex]
+        if (/^\S/.test(nestedLine)) {
+          break
+        }
+
+        const listMatch = /^\s*-\s+(.*)$/.exec(nestedLine)
+        if (listMatch) {
+          listValues.push(...this.extractRemoteImageUrlsFromYamlValue(listMatch[1]))
+        }
+      }
+      values.push(...listValues)
+    }
+
+    return values
+  }
+
+  extractFrontmatterBlock(content: string): string | null {
+    if (!content.startsWith("---\n")) {
+      return null
+    }
+
+    const endIndex = content.indexOf("\n---", 4)
+    if (endIndex === -1) {
+      return null
+    }
+
+    return content.slice(4, endIndex)
+  }
+
+  extractRemoteImageUrlsFromYamlValue(rawValue: string): string[] {
+    const trimmed = rawValue.trim()
+    if (trimmed === "") {
+      return []
+    }
+
+    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+      return trimmed
+        .slice(1, -1)
+        .split(",")
+        .flatMap((part) => this.extractRemoteImageUrlsFromYamlValue(part))
+    }
+
+    const unquoted = trimmed.replace(/^['"]|['"]$/g, "")
+    return /^https?:\/\//i.test(unquoted) ? [unquoted] : []
   }
 
   async requestRemoteTrash(imageUrl: string): Promise<{ ok: boolean; error: string }> {
