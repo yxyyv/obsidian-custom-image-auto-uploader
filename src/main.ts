@@ -1035,6 +1035,10 @@ export default class CustomImageAutoUploader extends Plugin {
 
     if (candidateImageUrls.length === 0) {
       this.removeDeletedNoteRecord(lookupPath)
+      if (lookupPath !== file.path) {
+        this.removeDeletedNoteRecord(file.path)
+      }
+      await this.savePluginState()
       return
     }
 
@@ -1057,8 +1061,8 @@ export default class CustomImageAutoUploader extends Plugin {
 
     if (changed) {
       this.pruneRemoteTrashHistory()
-      await this.savePluginState()
     }
+    await this.savePluginState()
   }
 
   async restoreCompletedRemoteTrashTask(imageUrl: string, notePath: string): Promise<boolean> {
@@ -1069,6 +1073,19 @@ export default class CustomImageAutoUploader extends Plugin {
 
     const restoreResult = await this.requestRemoteRestore(historyTask.imageUrl)
     if (!restoreResult.ok) {
+      if (this.isRemoteImageAlreadyRestoredError(restoreResult.error)) {
+        this.pushRemoteTrashHistory({
+          ...historyTask,
+          id: this.createTaskId(),
+          notePath,
+          status: "restored",
+          finishedAt: Date.now(),
+          restoredAt: Date.now(),
+          lastError: "",
+        })
+        return true
+      }
+
       this.pushRemoteTrashHistory({
         ...historyTask,
         id: this.createTaskId(),
@@ -1095,6 +1112,12 @@ export default class CustomImageAutoUploader extends Plugin {
     })
     new Notice($("远端图片已恢复"))
     return true
+  }
+
+  isRemoteImageAlreadyRestoredError(errorMessage: string): boolean {
+    const normalizedMessage = errorMessage.trim()
+    return normalizedMessage.includes("原始图片路径已存在文件，无法恢复")
+      || normalizedMessage.includes("Original image path already exists")
   }
 
   findLatestRemoteTrashHistoryTask(imageUrl: string, status: RemoteTrashTask["status"]): RemoteTrashTask | undefined {
