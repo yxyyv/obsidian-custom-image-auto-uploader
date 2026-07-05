@@ -1,4 +1,4 @@
-import { MarkdownView, Menu, Notice, Plugin, TFile, debounce } from "obsidian";
+import { CachedMetadata, MarkdownView, Menu, Notice, Plugin, TFile, debounce } from "obsidian";
 
 import {
   autoAddExcludeDomain,
@@ -16,7 +16,7 @@ import {
   showTaskNotice,
   statusCheck,
 } from "./lib/utils";
-import { DownTask, RemoteTrashTask, RemoteTrashTaskStore, UploadTask } from "./lib/interface";
+import { DeletedNoteRemoteImageRecord, DownTask, RemoteTrashTask, RemoteTrashTaskSource, RemoteTrashTaskStore, UploadTask } from "./lib/interface";
 import { DEFAULT_SETTINGS, PluginSettings, SettingTab } from "./setting";
 import { $ } from "./lang/lang";
 
@@ -26,6 +26,7 @@ const markdownImageRegex = /!\[([^\]]*)\]\((.*?)\s*("(?:.*[^"])")?\s*\)/g;
 interface PersistedPluginData {
   settings: PluginSettings
   remoteTrash: RemoteTrashTaskStore
+  deletedNotes?: DeletedNoteRemoteImageRecord[]
 }
 
 interface RemoveRemoteImageReferenceResult {
@@ -35,11 +36,18 @@ interface RemoveRemoteImageReferenceResult {
 
 interface RemoteImageReferenceSearchOptions {
   contentOverrides?: Record<string, string>
+  excludeFilePaths?: string[]
 }
 
 interface RemoteImageReferenceLocation {
   filePath: string
   kind: "markdown" | "metadata"
+}
+
+interface RemoteFileImageExtractOptions {
+  filePath: string
+  content?: string
+  cache?: CachedMetadata
 }
 
 const DEFAULT_REMOTE_TRASH_STORE: RemoteTrashTaskStore = {
@@ -60,6 +68,8 @@ export default class CustomImageAutoUploader extends Plugin {
   statusType: "download" | "upload" | "all" | "none" = "none"
   fromPluginSet = false
   remoteTrashTasks: RemoteTrashTaskStore = structuredClone(DEFAULT_REMOTE_TRASH_STORE)
+  deletedNoteRecords: DeletedNoteRemoteImageRecord[] = []
+  noteContentSnapshots: Record<string, string> = {}
   remoteTrashTimer: number | null = null
   isProcessingRemoteTrashTasks = false
 
@@ -101,6 +111,18 @@ export default class CustomImageAutoUploader extends Plugin {
     )
 
     this.registerEvent(this.app.workspace.on("editor-change", debouncedProcess))
+    this.registerEvent(this.app.vault.on("modify", (file) => {
+      void this.captureNoteSnapshot(file)
+    }))
+    this.registerEvent(this.app.vault.on("create", (file) => {
+      void this.handleVaultCreate(file)
+    }))
+    this.registerEvent(this.app.vault.on("delete", (file) => {
+      void this.handleVaultDelete(file)
+    }))
+    this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
+      void this.handleVaultRename(file, oldPath)
+    }))
 
     this.addCommand({
       id: "down-current-images",
@@ -684,11 +706,13 @@ export default class CustomImageAutoUploader extends Plugin {
         pendingTasks: data.remoteTrash?.pendingTasks ?? [],
         historyTasks: data.remoteTrash?.historyTasks ?? [],
       }
+      this.deletedNoteRecords = data.deletedNotes ?? []
       return
     }
 
     this.settings = Object.assign({}, DEFAULT_SETTINGS, raw ?? {})
     this.remoteTrashTasks = structuredClone(DEFAULT_REMOTE_TRASH_STORE)
+    this.deletedNoteRecords = []
   }
 
   async saveSettings(isStatusCheck: boolean = true) {
@@ -703,6 +727,7 @@ export default class CustomImageAutoUploader extends Plugin {
     await this.saveData({
       settings: this.settings,
       remoteTrash: this.remoteTrashTasks,
+      deletedNotes: this.deletedNoteRecords,
     } satisfies PersistedPluginData)
   }
 
@@ -771,8 +796,26 @@ export default class CustomImageAutoUploader extends Plugin {
       return
     }
 
-    await this.enqueueRemoteTrashTask(imageUrl, activeFile.path)
+    await this.enqueueRemoteTrashTask(imageUrl, activeFile.path, "single-image-delete")
     new Notice($("已创建远端回收任务，图片将在宽限期后检查并移入 .trash"))
+  }
+
+  async captureNoteSnapshot(file: unknown) {
+    if (!(file instanceof TFile) || file.extension !== "md") {
+      return
+    }
+
+    const openOverride = this.getOpenEditorMarkdownOverrides()[file.path]
+    if (typeof openOverride === "string") {
+      this.noteContentSnapshots[file.path] = openOverride
+      return
+    }
+
+    try {
+      this.noteContentSnapshots[file.path] = await this.app.vault.read(file)
+    } catch {
+      delete this.noteContentSnapshots[file.path]
+    }
   }
 
   async removeRemoteImageReferenceFromFile(file: TFile, imageUrl: string): Promise<RemoveRemoteImageReferenceResult> {
@@ -812,25 +855,37 @@ export default class CustomImageAutoUploader extends Plugin {
     }
   }
 
-  async enqueueRemoteTrashTask(imageUrl: string, notePath: string) {
+  async enqueueRemoteTrashTask(imageUrl: string, notePath: string, source: RemoteTrashTaskSource, imageRefs?: string[]) {
     const now = Date.now()
-    const existingTask = this.remoteTrashTasks.pendingTasks.find((task) => task.imageUrl === imageUrl)
+    const normalizedImageUrl = this.normalizeRemoteImageUrl(imageUrl)
+    const existingTask = this.remoteTrashTasks.pendingTasks.find((task) => task.imageUrl === normalizedImageUrl)
 
     if (existingTask) {
       existingTask.notePath = notePath
+      existingTask.source = source
+      existingTask.imageRefs = imageRefs ?? existingTask.imageRefs
       existingTask.createdAt = now
       existingTask.graceUntil = now + this.settings.remoteTrashGraceMs
       existingTask.lastError = ""
+      existingTask.finishedAt = null
+      existingTask.sourcePath = undefined
+      existingTask.trashPath = undefined
+      existingTask.restoredAt = null
     } else {
       this.remoteTrashTasks.pendingTasks.push({
         id: this.createTaskId(),
-        imageUrl,
+        imageUrl: normalizedImageUrl,
+        source,
         notePath,
+        imageRefs,
         createdAt: now,
         graceUntil: now + this.settings.remoteTrashGraceMs,
         status: "pending",
         lastError: "",
         finishedAt: null,
+        sourcePath: undefined,
+        trashPath: undefined,
+        restoredAt: null,
       })
     }
 
@@ -902,6 +957,175 @@ export default class CustomImageAutoUploader extends Plugin {
     return true
   }
 
+  async handleVaultDelete(file: unknown) {
+    if (!(file instanceof TFile) || file.extension !== "md") {
+      return
+    }
+
+    const snapshotContent = this.noteContentSnapshots[file.path]
+    const cachedMetadata = this.app.metadataCache.getFileCache(file)
+    const imageUrls = this.extractRemoteImageUrlsFromNote({
+      filePath: file.path,
+      content: snapshotContent,
+      cache: cachedMetadata ?? undefined,
+    })
+
+    delete this.noteContentSnapshots[file.path]
+
+    if (imageUrls.length === 0) {
+      this.removeDeletedNoteRecord(file.path)
+      return
+    }
+
+    this.upsertDeletedNoteRecord(file.path, imageUrls)
+
+    for (const imageUrl of imageUrls) {
+      const isStillReferenced = await this.isRemoteImageReferencedInVault(imageUrl, {
+        excludeFilePaths: [file.path],
+      })
+      if (isStillReferenced) {
+        continue
+      }
+
+      await this.enqueueRemoteTrashTask(imageUrl, file.path, "note-delete", imageUrls)
+    }
+  }
+
+  async handleVaultCreate(file: unknown) {
+    if (!(file instanceof TFile) || file.extension !== "md") {
+      return
+    }
+
+    await this.captureNoteSnapshot(file)
+    await this.handleRestoredNote(file, file.path)
+  }
+
+  async handleVaultRename(file: unknown, oldPath: string) {
+    if (!(file instanceof TFile) || file.extension !== "md") {
+      delete this.noteContentSnapshots[oldPath]
+      return
+    }
+
+    const existingSnapshot = this.noteContentSnapshots[oldPath]
+    if (existingSnapshot) {
+      this.noteContentSnapshots[file.path] = existingSnapshot
+      delete this.noteContentSnapshots[oldPath]
+    }
+
+    const previousRecord = this.deletedNoteRecords.find((item) => item.notePath === oldPath)
+    if (previousRecord) {
+      await this.captureNoteSnapshot(file)
+      await this.handleRestoredNote(file, oldPath)
+      return
+    }
+
+    await this.captureNoteSnapshot(file)
+  }
+
+  async handleRestoredNote(file: TFile, lookupPath: string) {
+    const content = this.getOpenEditorMarkdownOverrides()[file.path] ?? await this.app.vault.read(file)
+    const restoredImageUrls = this.extractRemoteImageUrlsFromNote({
+      filePath: file.path,
+      content,
+      cache: this.app.metadataCache.getFileCache(file) ?? undefined,
+    })
+
+    const deletedRecord = this.deletedNoteRecords.find((item) => item.notePath === lookupPath)
+    const candidateImageUrls = Array.from(new Set([...(deletedRecord?.imageUrls ?? []), ...restoredImageUrls]))
+
+    if (candidateImageUrls.length === 0) {
+      this.removeDeletedNoteRecord(lookupPath)
+      return
+    }
+
+    let changed = false
+    for (const imageUrl of candidateImageUrls) {
+      const cancelled = this.cancelPendingRemoteTrashTaskInternal(imageUrl)
+      if (cancelled) {
+        changed = true
+        continue
+      }
+
+      const restored = await this.restoreCompletedRemoteTrashTask(imageUrl, lookupPath)
+      changed = changed || restored
+    }
+
+    this.removeDeletedNoteRecord(lookupPath)
+    if (lookupPath !== file.path) {
+      this.removeDeletedNoteRecord(file.path)
+    }
+
+    if (changed) {
+      this.pruneRemoteTrashHistory()
+      await this.savePluginState()
+    }
+  }
+
+  async restoreCompletedRemoteTrashTask(imageUrl: string, notePath: string): Promise<boolean> {
+    const historyTask = this.findLatestRemoteTrashHistoryTask(imageUrl, "completed")
+    if (!historyTask?.trashPath || !historyTask.sourcePath) {
+      return false
+    }
+
+    const restoreResult = await this.requestRemoteRestore(historyTask.imageUrl)
+    if (!restoreResult.ok) {
+      this.pushRemoteTrashHistory({
+        ...historyTask,
+        id: this.createTaskId(),
+        source: historyTask.source ?? "note-delete",
+        notePath,
+        status: "failed",
+        finishedAt: Date.now(),
+        lastError: restoreResult.error,
+      })
+      new Notice($("远端恢复失败:") + restoreResult.error)
+      return false
+    }
+
+    this.pushRemoteTrashHistory({
+      ...historyTask,
+      id: this.createTaskId(),
+      notePath,
+      status: "restored",
+      finishedAt: Date.now(),
+      restoredAt: Date.now(),
+      lastError: "",
+      sourcePath: restoreResult.sourcePath,
+      trashPath: restoreResult.trashPath,
+    })
+    new Notice($("远端图片已恢复"))
+    return true
+  }
+
+  findLatestRemoteTrashHistoryTask(imageUrl: string, status: RemoteTrashTask["status"]): RemoteTrashTask | undefined {
+    const normalizedImageUrl = this.normalizeRemoteImageUrl(imageUrl)
+    const matchedTasks = this.remoteTrashTasks.historyTasks
+      .filter((task) => task.imageUrl === normalizedImageUrl && task.status === status)
+      .sort((left, right) => (right.finishedAt ?? 0) - (left.finishedAt ?? 0))
+
+    return matchedTasks[0]
+  }
+
+  upsertDeletedNoteRecord(notePath: string, imageUrls: string[]) {
+    const normalizedUrls = Array.from(new Set(imageUrls.map((item) => this.normalizeRemoteImageUrl(item))))
+    const existingRecord = this.deletedNoteRecords.find((item) => item.notePath === notePath)
+    if (existingRecord) {
+      existingRecord.imageUrls = normalizedUrls
+      existingRecord.deletedAt = Date.now()
+      return
+    }
+
+    this.deletedNoteRecords.push({
+      notePath,
+      imageUrls: normalizedUrls,
+      deletedAt: Date.now(),
+    })
+  }
+
+  removeDeletedNoteRecord(notePath: string) {
+    this.deletedNoteRecords = this.deletedNoteRecords.filter((item) => item.notePath !== notePath)
+  }
+
   async processPendingRemoteTrashTasks() {
     if (this.isProcessingRemoteTrashTasks) {
       return
@@ -938,6 +1162,8 @@ export default class CustomImageAutoUploader extends Plugin {
             status: "completed",
             finishedAt: Date.now(),
             lastError: "",
+            sourcePath: trashResult.sourcePath,
+            trashPath: trashResult.trashPath,
           })
           new Notice($("远端图片已移入回收站"))
         } else {
@@ -975,13 +1201,48 @@ export default class CustomImageAutoUploader extends Plugin {
     return locations.length > 0
   }
 
+  extractRemoteImageUrlsFromNote(options: RemoteFileImageExtractOptions): string[] {
+    const normalizedUrls = new Set<string>()
+
+    if (typeof options.content === "string") {
+      const markdownMatches = options.content.matchAll(markdownImageRegex)
+      for (const match of markdownMatches) {
+        if (/^https?:\/\//i.test(match[2])) {
+          normalizedUrls.add(this.normalizeRemoteImageUrl(match[2]))
+        }
+      }
+
+      for (const value of this.extractRemoteImageUrlsFromFrontmatter(options.content)) {
+        normalizedUrls.add(this.normalizeRemoteImageUrl(value))
+      }
+    }
+
+    if (options.cache) {
+      const metadata = metadataCacheHandle(options.cache, this)
+      for (const item of metadata) {
+        for (const value of item.value) {
+          if (/^https?:\/\//i.test(value)) {
+            normalizedUrls.add(this.normalizeRemoteImageUrl(value))
+          }
+        }
+      }
+    }
+
+    return Array.from(normalizedUrls)
+  }
+
   async getRemoteImageReferenceLocations(imageUrl: string, options?: RemoteImageReferenceSearchOptions): Promise<RemoteImageReferenceLocation[]> {
     const markdownFiles = this.app.vault.getMarkdownFiles()
     const normalizedImageUrl = this.normalizeRemoteImageUrl(imageUrl)
     const contentOverrides = options?.contentOverrides ?? {}
+    const excludedPaths = new Set(options?.excludeFilePaths ?? [])
     const locations: RemoteImageReferenceLocation[] = []
 
     for (const file of markdownFiles) {
+      if (excludedPaths.has(file.path)) {
+        continue
+      }
+
       const hasContentOverride = Object.prototype.hasOwnProperty.call(contentOverrides, file.path)
       const content = hasContentOverride ? contentOverrides[file.path] : await this.app.vault.read(file)
       const markdownMatches = content.matchAll(markdownImageRegex)
@@ -1118,8 +1379,8 @@ export default class CustomImageAutoUploader extends Plugin {
     return /^https?:\/\//i.test(unquoted) ? [unquoted] : []
   }
 
-  async requestRemoteTrash(imageUrl: string): Promise<{ ok: boolean; error: string }> {
-    const apiUrl = this.buildRemoteTrashApiUrl()
+  async requestRemoteTrash(imageUrl: string): Promise<{ ok: boolean; error: string; sourcePath?: string; trashPath?: string }> {
+    const apiUrl = this.buildRemoteImageLifecycleApiUrl("trash")
     const headers = new Headers({ "Content-Type": "application/json" })
     if (this.settings.apiToken !== "") {
       headers.set("Authorization", this.settings.apiToken)
@@ -1138,7 +1399,7 @@ export default class CustomImageAutoUploader extends Plugin {
       })
 
       const rawText = await response.text()
-      let result: { status?: boolean; message?: string; details?: string | string[] } = {}
+      let result: { status?: boolean; message?: string; details?: string | string[]; data?: { sourcePath?: string; trashPath?: string } } = {}
       try {
         result = rawText ? JSON.parse(rawText) : {}
       } catch {
@@ -1153,7 +1414,12 @@ export default class CustomImageAutoUploader extends Plugin {
         }
       }
 
-      return { ok: true, error: "" }
+      return {
+        ok: true,
+        error: "",
+        sourcePath: result.data?.sourcePath,
+        trashPath: result.data?.trashPath,
+      }
     } catch (error) {
       return {
         ok: false,
@@ -1162,16 +1428,65 @@ export default class CustomImageAutoUploader extends Plugin {
     }
   }
 
-  buildRemoteTrashApiUrl(): string {
+  async requestRemoteRestore(imageUrl: string): Promise<{ ok: boolean; error: string; sourcePath?: string; trashPath?: string }> {
+    const apiUrl = this.buildRemoteImageLifecycleApiUrl("restore")
+    const headers = new Headers({ "Content-Type": "application/json" })
+    if (this.settings.apiToken !== "") {
+      headers.set("Authorization", this.settings.apiToken)
+    }
+
+    const body: Record<string, string> = { imageUrl }
+    if (this.settings.uploadConfigId.trim() !== "") {
+      body.id = this.settings.uploadConfigId.trim()
+    }
+
+    try {
+      const response = await fetch(apiUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      })
+
+      const rawText = await response.text()
+      let result: { status?: boolean; message?: string; details?: string | string[]; data?: { sourcePath?: string; trashPath?: string } } = {}
+      try {
+        result = rawText ? JSON.parse(rawText) : {}
+      } catch {
+        result = { message: rawText }
+      }
+
+      if (!response.ok || result.status === false) {
+        const detailsText = Array.isArray(result.details) ? result.details.join(",") : (result.details ?? "")
+        return {
+          ok: false,
+          error: `${result.message ?? response.statusText}${detailsText ? ` ${detailsText}` : ""}`.trim(),
+        }
+      }
+
+      return {
+        ok: true,
+        error: "",
+        sourcePath: result.data?.sourcePath,
+        trashPath: result.data?.trashPath,
+      }
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : $("网络错误,请检查网络是否通畅"),
+      }
+    }
+  }
+
+  buildRemoteImageLifecycleApiUrl(action: "trash" | "restore"): string {
     const apiUrl = new URL(this.settings.api)
     const pathname = apiUrl.pathname.replace(/\/+$/, "")
 
     if (pathname.endsWith("/user/upload")) {
-      apiUrl.pathname = pathname.replace(/\/user\/upload$/, "/user/image/trash")
+      apiUrl.pathname = pathname.replace(/\/user\/upload$/, `/user/image/${action}`)
     } else if (pathname.endsWith("/upload")) {
-      apiUrl.pathname = pathname.replace(/\/upload$/, "/image/trash")
+      apiUrl.pathname = pathname.replace(/\/upload$/, `/image/${action}`)
     } else {
-      apiUrl.pathname = `${pathname}/image/trash`
+      apiUrl.pathname = `${pathname}/image/${action}`
     }
 
     apiUrl.search = ""

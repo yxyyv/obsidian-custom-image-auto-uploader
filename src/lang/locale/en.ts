@@ -122,4 +122,6 @@ export default <LangMap>{
   "远端回收任务已取消，图片仍被引用": "The remote trash task was cancelled because the image is still referenced",
   "远端图片已移入回收站": "The remote image has been moved to trash",
   "远端回收失败:": "Remote trash failed:",
+  "远端图片已恢复": "The remote image has been restored",
+  "远端恢复失败:": "Remote restore failed:",
 };

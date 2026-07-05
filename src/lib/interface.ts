@@ -26,20 +26,32 @@ export interface UploadTask {
   metadataItem?: Metadata
 }
 
-export type RemoteTrashTaskStatus = "pending" | "completed" | "cancelled" | "failed"
+export type RemoteTrashTaskStatus = "pending" | "completed" | "cancelled" | "failed" | "restored"
+export type RemoteTrashTaskSource = "single-image-delete" | "note-delete"
 
 export interface RemoteTrashTask {
   id: string
   imageUrl: string
+  source: RemoteTrashTaskSource
   notePath: string
+  imageRefs?: string[]
   createdAt: number
   graceUntil: number
   status: RemoteTrashTaskStatus
   lastError: string
   finishedAt: number | null
+  sourcePath?: string
+  trashPath?: string
+  restoredAt?: number | null
 }
 
 export interface RemoteTrashTaskStore {
   pendingTasks: RemoteTrashTask[]
   historyTasks: RemoteTrashTask[]
+}
+
+export interface DeletedNoteRemoteImageRecord {
+  notePath: string
+  imageUrls: string[]
+  deletedAt: number
 }
