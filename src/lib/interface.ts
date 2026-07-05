@@ -20,6 +20,8 @@ export interface DownTask {
 export interface UploadTask {
   matchText: string // 原始匹配文本
   imageAlt: string // 图片替代文本
+  imageDisplayText?: string // Markdown 中保留的显示文本
+  imageSize?: string // 图片尺寸定义
   imageFile: TFile // 图片路径
   metadataItem?: Metadata
 }

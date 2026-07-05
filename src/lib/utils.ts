@@ -120,19 +120,54 @@ export async function getAttachmentUploadPath(image: string, plugin: CustomImage
   return plugin.app.metadataCache.getFirstLinkpathDest(image, image)
 }
 
+function isImageSizeSpec(value: string): boolean {
+  return /^\d+\s*(?:x\s*\d+)?$/i.test(value.trim())
+}
+
+export interface ParsedWikiImageLink {
+  file: string
+  imageAlt: string
+  imageDisplayText: string
+  imageSize?: string
+}
+
+export function parseWikiImageLink(rawLink: string): ParsedWikiImageLink {
+  const [rawFile = "", ...displayParts] = rawLink.split("|")
+  const file = rawFile.trim()
+
+  if (displayParts.length === 0) {
+    return { file, imageAlt: file, imageDisplayText: file }
+  }
+
+  const normalizedParts = displayParts.map((part) => part.trim())
+  const lastPart = normalizedParts[normalizedParts.length - 1]
+
+  if (isImageSizeSpec(lastPart)) {
+    const imageAlt = normalizedParts.slice(0, -1).join("|").trim() || file
+    const imageDisplayText = `${imageAlt}|${lastPart}`
+    return { file, imageAlt, imageDisplayText, imageSize: lastPart }
+  }
+
+  return {
+    file,
+    imageAlt: normalizedParts.join("|").trim() || file,
+    imageDisplayText: normalizedParts.join("|").trim() || file,
+  }
+}
+
 /**
  * 替换文本中的内容 (WikiLink format for Uploads)
  * @param content - 原始内容
  * @param search - 要替换的内容
  * @param desc - 描述 (alt text)
  * @param path - 路径 (URL or file path)
- * @returns 替换后的内容: ![desc](path)
+ * @param imageDisplayText - 需要保留的显示文本
+ * @returns 替换后的内容: ![image.jpg|200](path)
  */
-export function replaceInTextForUpload(content: string, search: string, desc: string, path: string): string {
-  const newLink = `![${desc}](${path})`
+export function replaceInTextForUpload(content: string, search: string, desc: string, path: string, imageDisplayText?: string): string {
+  const newLink = `![${imageDisplayText || desc}](${path})`
   return content.split(search).join(newLink)
 }
-
 /**
  * 替换文本中的内容 (WikiLink format for Downloads)
  * @param content - 原始内容

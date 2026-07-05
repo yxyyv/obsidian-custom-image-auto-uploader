@@ -8,6 +8,7 @@ import {
   imageDown,
   imageUpload,
   metadataCacheHandle,
+  parseWikiImageLink,
   replaceInTextForDownload,
   replaceInTextForUpload,
   setMenu,
@@ -19,7 +20,7 @@ import { DownTask, RemoteTrashTask, RemoteTrashTaskStore, UploadTask } from "./l
 import { DEFAULT_SETTINGS, PluginSettings, SettingTab } from "./setting";
 import { $ } from "./lang/lang";
 
-const wikilinkImageRegex = /!\[\[([^\]|]*)\|?([^\]]*)\]\]/g;
+const wikilinkImageRegex = /!\[\[([^\]]+)\]\]/g;
 const markdownImageRegex = /!\[([^\]]*)\]\((.*?)\s*("(?:.*[^"])")?\s*\)/g;
 
 interface PersistedPluginData {
@@ -296,18 +297,20 @@ export default class CustomImageAutoUploader extends Plugin {
       if (uniqueTask.has(match[0])) continue
       uniqueTask.add(match[0])
 
-      if (/^http/.test(match[1])) {
+      const parsedLink = parseWikiImageLink(match[1])
+      if (/^http/.test(parsedLink.file)) {
         continue
       }
 
-      const file = match[1]
+      const file = parsedLink.file
       const readfile = await getAttachmentUploadPath(file, this)
       if (!readfile) continue
 
-      const imageAlt = match[2] ? match[2] : file
       uploadTasks.push({
         matchText: match[0],
-        imageAlt,
+        imageAlt: parsedLink.imageAlt,
+        imageDisplayText: parsedLink.imageDisplayText,
+        imageSize: parsedLink.imageSize,
         imageFile: readfile,
       })
       this.uploadStatus.total++
@@ -331,7 +334,7 @@ export default class CustomImageAutoUploader extends Plugin {
         statusCheck(this)
 
         const searchStr = this.settings.uploadImageRandomSearch ? `?${generateRandomString(10)}` : ""
-        fileContent = replaceInTextForUpload(fileContent, task.matchText, task.imageAlt, result.imageUrl + searchStr)
+        fileContent = replaceInTextForUpload(fileContent, task.matchText, task.imageAlt, result.imageUrl + searchStr, task.imageDisplayText)
         autoAddExcludeDomain(result.imageUrl, this)
       }
     }
@@ -556,17 +559,19 @@ export default class CustomImageAutoUploader extends Plugin {
         const matches = content.matchAll(wikilinkImageRegex)
 
         for (const match of matches) {
-          if (/^http/.test(match[1])) {
+          const parsedLink = parseWikiImageLink(match[1])
+          if (/^http/.test(parsedLink.file)) {
             continue
           }
-          const linkFile = match[1]
+          const linkFile = parsedLink.file
           const readfile = await getAttachmentUploadPath(linkFile, this)
           if (!readfile) continue
 
-          const imageAlt = match[2] ? match[2] : linkFile
           fileTasks.push({
             matchText: match[0],
-            imageAlt,
+            imageAlt: parsedLink.imageAlt,
+            imageDisplayText: parsedLink.imageDisplayText,
+            imageSize: parsedLink.imageSize,
             imageFile: readfile,
           })
           this.uploadStatus.total++
@@ -597,7 +602,7 @@ export default class CustomImageAutoUploader extends Plugin {
             this.uploadStatus.current++
             statusCheck(this)
             const searchStr = this.settings.uploadImageRandomSearch ? `?${generateRandomString(10)}` : ""
-            fileContent = replaceInTextForUpload(fileContent, task.matchText, task.imageAlt, result.imageUrl + searchStr)
+            fileContent = replaceInTextForUpload(fileContent, task.matchText, task.imageAlt, result.imageUrl + searchStr, task.imageDisplayText)
             autoAddExcludeDomain(result.imageUrl, this)
           }
         }
