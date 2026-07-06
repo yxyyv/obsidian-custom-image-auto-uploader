@@ -51,6 +51,8 @@ export interface PluginSettings {
   // isHandleClipboard: boolean;
   //本地图片上传后是否删除
   isDeleteSource: boolean
+  // 上传时是否使用服务端安全重命名
+  renameOnUpload: boolean
   //上传后的图片是否随机后缀
   uploadImageRandomSearch: boolean
   isCompress: boolean
@@ -95,10 +97,12 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   excludeDomains: "",
   // 本地图片上传后是否删除
   isDeleteSource: false,
+  // 上传时是否请求服务端重命名
+  renameOnUpload: false,
   // 上传后的图片是否随机后缀
   uploadImageRandomSearch: true,
   // 图片预压缩设置
-  isCompress: true,
+  isCompress: false,
   compressMaxWidth: 1200,
   compressMaxHeight: 1200,
   compressQuality: 1,
@@ -294,8 +298,19 @@ export class SettingTab extends PluginSettingTab {
       .setClass("custom-image-auto-uploader-settings-tag")
 
     new Setting(set)
-      .setName($("上传速度优化"))
-      .setDesc($("在图片上传前是否进行压缩"))
+      .setName($("上传后重命名"))
+      .setDesc($("开启后，服务端会使用 年月日时分秒 命名；只有重名时才追加随机短串"))
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.renameOnUpload).onChange(async (value) => {
+          this.plugin.settings.renameOnUpload = value
+          this.display()
+          await this.plugin.saveSettings()
+        })
+      )
+
+    new Setting(set)
+      .setName($("压缩后再上传"))
+      .setDesc($("压缩后再上传；关闭时直接上传原图"))
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.isCompress).onChange(async (value) => {
           this.plugin.settings.isCompress = value
@@ -306,7 +321,7 @@ export class SettingTab extends PluginSettingTab {
 
     if (this.plugin.settings.isCompress) {
       new Setting(set)
-        .setName($("上传速度优化 - 压缩质量"))
+        .setName($("压缩后再上传 - 压缩质量"))
         .setDesc($("压缩后的图片质量,范围0-1,默认0.8"))
         .addText((text) =>
           text.setValue(this.plugin.settings.compressQuality.toString()).onChange(async (value) => {
@@ -316,7 +331,7 @@ export class SettingTab extends PluginSettingTab {
         )
 
       new Setting(set)
-        .setName($("上传速度优化 - 最大宽度"))
+        .setName($("压缩后再上传 - 最大宽度"))
         .setDesc($("压缩后的最大宽度,单位像素,默认1200"))
         .addText((text) =>
           text.setValue(this.plugin.settings.compressMaxWidth.toString()).onChange(async (value) => {
@@ -326,7 +341,7 @@ export class SettingTab extends PluginSettingTab {
         )
 
       new Setting(set)
-        .setName($("上传速度优化 - 最大高度"))
+        .setName($("压缩后再上传 - 最大高度"))
         .setDesc($("压缩后的最大高度,单位像素,默认1200"))
         .addText((text) =>
           text.setValue(this.plugin.settings.compressMaxHeight.toString()).onChange(async (value) => {

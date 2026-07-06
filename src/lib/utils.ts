@@ -293,7 +293,7 @@ export async function imageUpload(file: TFile, postData: UploadSet | undefined, 
 
   if (!postData) return { err: true, msg: $("扩展参数为空") }
 
-  let compressedBody = body
+  let uploadBody = body
 
   if (plugin.settings.isCompress) {
     try {
@@ -333,7 +333,7 @@ export async function imageUpload(file: TFile, postData: UploadSet | undefined, 
             (blob) => {
               if (blob) {
                 blob.arrayBuffer().then((buffer) => {
-                  compressedBody = buffer
+                  uploadBody = buffer
                   resolve(null)
                 })
               }
@@ -352,7 +352,7 @@ export async function imageUpload(file: TFile, postData: UploadSet | undefined, 
   }
 
   let requestData = new FormData()
-  requestData.append("imagefile", new Blob([compressedBody], { type: `image/${file.extension}` }), file.name)
+  requestData.append("imagefile", new Blob([uploadBody], { type: `image/${file.extension}` }), file.name)
 
   Object.keys(postData).forEach((v, i, p) => {
     requestData.append(v, postData[v])
@@ -360,6 +360,12 @@ export async function imageUpload(file: TFile, postData: UploadSet | undefined, 
 
   if (plugin.settings.uploadConfigId.trim() !== "") {
     requestData.append("id", plugin.settings.uploadConfigId.trim())
+  }
+
+  requestData.append("renameOnUpload", plugin.settings.renameOnUpload ? "true" : "false")
+  requestData.append("renamePattern", "second-only-append-random-on-conflict")
+  if (typeof file.stat?.mtime === "number" && Number.isFinite(file.stat.mtime)) {
+    requestData.append("sourceMtime", String(Math.round(file.stat.mtime)))
   }
 
   let response
