@@ -1245,7 +1245,7 @@ export default class CustomImageAutoUploader extends Plugin {
   }
 
   async restoreCompletedRemoteTrashTask(imageUrl: string, notePath: string): Promise<boolean> {
-    const historyTask = this.findLatestRemoteTrashHistoryTask(imageUrl, "completed")
+    const historyTask = this.findLatestRecoverableRemoteTrashTask(imageUrl)
     if (!historyTask?.trashPath || !historyTask.sourcePath) {
       return false
     }
@@ -1265,6 +1265,7 @@ export default class CustomImageAutoUploader extends Plugin {
         return true
       }
 
+      const isMissingFromTrash = this.isRemoteImageMissingFromTrashError(restoreResult.error)
       this.pushRemoteTrashHistory({
         ...historyTask,
         id: this.createTaskId(),
@@ -1274,6 +1275,11 @@ export default class CustomImageAutoUploader extends Plugin {
         finishedAt: Date.now(),
         lastError: restoreResult.error,
       })
+      if (isMissingFromTrash) {
+        new Notice($("远端恢复失败:") + restoreResult.error)
+        return false
+      }
+
       new Notice($("远端恢复失败:") + restoreResult.error)
       return false
     }
@@ -1299,13 +1305,42 @@ export default class CustomImageAutoUploader extends Plugin {
       || normalizedMessage.includes("Original image path already exists")
   }
 
-  findLatestRemoteTrashHistoryTask(imageUrl: string, status: RemoteTrashTask["status"]): RemoteTrashTask | undefined {
+  isRemoteImageMissingFromTrashError(errorMessage: string): boolean {
+    const normalizedMessage = errorMessage.trim().toLowerCase()
+    return normalizedMessage.includes("回收站中的图片文件不存在")
+      || normalizedMessage.includes("image file does not exist in trash")
+      || normalizedMessage.includes("image does not exist in trash")
+      || normalizedMessage.includes("trash image does not exist")
+  }
+
+  findLatestRemoteTrashHistoryTask(imageUrl: string, status?: RemoteTrashTask["status"]): RemoteTrashTask | undefined {
     const normalizedImageUrl = this.normalizeRemoteImageUrl(imageUrl)
     const matchedTasks = this.remoteTrashTasks.historyTasks
-      .filter((task) => task.imageUrl === normalizedImageUrl && task.status === status)
+      .filter((task) => task.imageUrl === normalizedImageUrl && (status ? task.status === status : true))
       .sort((left, right) => (right.finishedAt ?? 0) - (left.finishedAt ?? 0))
 
     return matchedTasks[0]
+  }
+
+  findLatestRecoverableRemoteTrashTask(imageUrl: string): RemoteTrashTask | undefined {
+    const latestTask = this.findLatestRemoteTrashHistoryTask(imageUrl)
+    if (!latestTask) {
+      return undefined
+    }
+
+    if (latestTask.status === "restored" || latestTask.status === "cancelled") {
+      return undefined
+    }
+
+    if (latestTask.status === "failed" && this.isRemoteImageMissingFromTrashError(latestTask.lastError)) {
+      return undefined
+    }
+
+    if (latestTask.status === "completed") {
+      return latestTask
+    }
+
+    return this.findLatestRemoteTrashHistoryTask(imageUrl, "completed")
   }
 
   upsertDeletedNoteRecord(notePath: string, imageUrls: string[]) {
