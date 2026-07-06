@@ -590,13 +590,15 @@ export function setMenu(menu: Menu, plugin: CustomImageAutoUploader, isShowAuto:
         })
     })
 
-    menu.addItem((item: MenuItem) => {
-      item
-        .setIcon("trash")
-        .setTitle($("删除未引用图片（全库）"))
-        .onClick(async () => {
-          await plugin.VaultDeleteUnreferencedImages()
-        })
-    })
+    // TEMP: hide the "delete unreferenced images" menu item for now.
+    // Keep the original implementation in place so it can be re-enabled later.
+    // menu.addItem((item: MenuItem) => {
+    //   item
+    //     .setIcon("trash")
+    //     .setTitle($("删除未引用图片（全库）"))
+    //     .onClick(async () => {
+    //       await plugin.VaultDeleteUnreferencedImages()
+    //     })
+    // })
   }
 }

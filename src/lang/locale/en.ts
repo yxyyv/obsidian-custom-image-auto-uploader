@@ -111,6 +111,7 @@ export default <LangMap>{
   "下载全库图片": "Download Whole Vault Images",
   "上传全库图片": "Upload Whole Vault Images",
   "删除未引用图片（全库）": "Delete all unreferenced images in the vault",
+  "删除未引用图片功能已临时禁用": "Delete unreferenced images is temporarily disabled",
   "已删除 ${count} 张未引用图片": "Deleted ${count} unreferenced images",
   "删除当前图片": "Delete current image",
   "已创建远端回收任务，图片将在宽限期后检查并移入 .trash": "A remote trash task has been created. The image will be checked after the grace period and moved to .trash",

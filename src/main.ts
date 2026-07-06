@@ -169,13 +169,15 @@ export default class CustomImageAutoUploader extends Plugin {
         showTaskNotice(this, "upload")
       },
     })
-    this.addCommand({
-      id: "delete-unreferenced-images",
-      name: $("删除未引用图片（全库）"),
-      callback: async () => {
-        await this.VaultDeleteUnreferencedImages()
-      },
-    })
+    // TEMP: disable the "delete unreferenced images" command for now.
+    // Keep the implementation in place so it can be re-enabled later.
+    // this.addCommand({
+    //   id: "delete-unreferenced-images",
+    //   name: $("删除未引用图片（全库）"),
+    //   callback: async () => {
+    //     await this.VaultDeleteUnreferencedImages()
+    //   },
+    // })
 
     this.registerEvent(
       this.app.workspace.on("file-menu", (menu: Menu) => {
@@ -677,6 +679,11 @@ export default class CustomImageAutoUploader extends Plugin {
   }
 
   async VaultDeleteUnreferencedImages() {
+    // TEMP: this feature is intentionally disabled for now.
+    // Keep the original cleanup logic below for future re-enable.
+    new Notice($("删除未引用图片功能已临时禁用"))
+    return
+
     const resolvedLinks = this.app.metadataCache.resolvedLinks
     const referencedFiles = new Set<string>()
 
@@ -691,14 +698,15 @@ export default class CustomImageAutoUploader extends Plugin {
     for (const file of markdownFiles) {
       const cache = this.app.metadataCache.getFileCache(file)
       if (cache) {
-        const metadata = metadataCacheHandle(cache, this)
+        const metadata = metadataCacheHandle(cache as NonNullable<typeof cache>, this)
         for (const item of metadata) {
           for (const val of item.value) {
             if (!/^http/.test(val)) {
               const targetFile = this.app.metadataCache.getFirstLinkpathDest(val, file.path)
-              if (targetFile) {
-                referencedFiles.add(targetFile.path)
+              if (targetFile === null) {
+                continue
               }
+              referencedFiles.add(targetFile!.path)
             }
           }
         }
