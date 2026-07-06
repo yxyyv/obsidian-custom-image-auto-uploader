@@ -54,6 +54,8 @@ const DEFAULT_REMOTE_TRASH_STORE: RemoteTrashTaskStore = {
   pendingTasks: [],
   historyTasks: [],
 };
+const MAX_NOTE_SNAPSHOTS = 50
+const NOTE_SNAPSHOT_TTL_MS = 30 * 60 * 1000
 
 function sleep(ms: number) {
   return new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -70,8 +72,12 @@ export default class CustomImageAutoUploader extends Plugin {
   remoteTrashTasks: RemoteTrashTaskStore = structuredClone(DEFAULT_REMOTE_TRASH_STORE)
   deletedNoteRecords: DeletedNoteRemoteImageRecord[] = []
   noteContentSnapshots: Record<string, string> = {}
+  noteSnapshotTouchedAt: Record<string, number> = {}
   remoteTrashTimer: number | null = null
   isProcessingRemoteTrashTasks = false
+  remoteImageReferencesByFile: Map<string, Set<string>> = new Map()
+  remoteImageReferenceFilesByUrl: Map<string, Set<string>> = new Map()
+  remoteImageReferenceIndexReady = false
 
   resetStatus(type: "download" | "upload" | "all" | "none", reset: boolean = true): void {
     this.statusType = type
@@ -104,7 +110,7 @@ export default class CustomImageAutoUploader extends Plugin {
           await this.MetadataImageAutoHandle()
           showTaskNotice(this, "all")
         }
-        await this.reconcilePendingRemoteTrashTasks()
+        await this.reconcilePendingRemoteTrashTasks(this.getActiveNoteRemoteImageUrls())
       },
       1000,
       true
@@ -113,6 +119,7 @@ export default class CustomImageAutoUploader extends Plugin {
     this.registerEvent(this.app.workspace.on("editor-change", debouncedProcess))
     this.registerEvent(this.app.vault.on("modify", (file) => {
       void this.captureNoteSnapshot(file)
+      void this.refreshRemoteImageReferenceIndexForFile(file)
     }))
     this.registerEvent(this.app.vault.on("create", (file) => {
       void this.handleVaultCreate(file)
@@ -313,6 +320,7 @@ export default class CustomImageAutoUploader extends Plugin {
     }
 
     const uploadTasks: UploadTask[] = []
+    const activeFile = this.app.workspace.getActiveFile()
     const matches = fileContent.matchAll(wikilinkImageRegex)
     const uniqueTask = new Set<string>()
     for (const match of matches) {
@@ -325,7 +333,7 @@ export default class CustomImageAutoUploader extends Plugin {
       }
 
       const file = parsedLink.file
-      const readfile = await getAttachmentUploadPath(file, this)
+      const readfile = await getAttachmentUploadPath(file, this, activeFile?.path)
       if (!readfile) continue
 
       uploadTasks.push({
@@ -340,6 +348,7 @@ export default class CustomImageAutoUploader extends Plugin {
     }
 
     let isModify = false
+    let excludeDomainsChanged = false
     const uploadResults = await Promise.all(
       uploadTasks.map(async (task) => {
         const result = await imageUpload(task.imageFile, this.settings.contentSet, this)
@@ -357,7 +366,7 @@ export default class CustomImageAutoUploader extends Plugin {
 
         const searchStr = this.settings.uploadImageRandomSearch ? `?${generateRandomString(10)}` : ""
         fileContent = replaceInTextForUpload(fileContent, task.matchText, task.imageAlt, result.imageUrl + searchStr, task.imageDisplayText)
-        autoAddExcludeDomain(result.imageUrl, this)
+        excludeDomainsChanged = autoAddExcludeDomain(result.imageUrl, this) || excludeDomainsChanged
       }
     }
 
@@ -366,6 +375,10 @@ export default class CustomImageAutoUploader extends Plugin {
       this.app.workspace.activeEditor?.editor?.setValue(filePropertyContent + fileContent)
       await this.app.workspace.activeEditor?.editor?.setCursor(cursor)
       this.fromPluginSet = false
+    }
+
+    if (excludeDomainsChanged) {
+      await this.savePluginState()
     }
   }
 
@@ -449,7 +462,7 @@ export default class CustomImageAutoUploader extends Plugin {
         if (/^http/.test(pic)) {
           continue
         }
-        const readfile = await getAttachmentUploadPath(pic, this)
+        const readfile = await getAttachmentUploadPath(pic, this, activeFile.path)
         if (!readfile || !item.params) continue
 
         uploadTasks.push({
@@ -507,7 +520,8 @@ export default class CustomImageAutoUploader extends Plugin {
       this.downloadStatus.total = 0
       this.downloadStatus.current = 0
 
-      const tasks: { file: TFile; downloadTasks: DownTask[] }[] = []
+      const tasks: { file: TFile; content: string; downloadTasks: DownTask[] }[] = []
+      const downloadResultCache = new Map<string, Promise<Awaited<ReturnType<typeof imageDown>>>>()
 
       for (const file of files) {
         const content = await this.app.vault.read(file)
@@ -529,17 +543,22 @@ export default class CustomImageAutoUploader extends Plugin {
           statusCheck(this)
         }
         if (fileTasks.length > 0) {
-          tasks.push({ file, downloadTasks: fileTasks })
+          tasks.push({ file, content, downloadTasks: fileTasks })
         }
       }
 
       for (const item of tasks) {
-        let fileContent = await this.app.vault.read(item.file)
+        let fileContent = item.content
         let isModify = false
 
         const downloadResults = await Promise.all(
           item.downloadTasks.map(async (task) => {
-            const result = await imageDown(task.imageUrl, this)
+            let resultPromise = downloadResultCache.get(task.imageUrl)
+            if (!resultPromise) {
+              resultPromise = imageDown(task.imageUrl, this)
+              downloadResultCache.set(task.imageUrl, resultPromise)
+            }
+            const result = await resultPromise
             return { task, result }
           })
         )
@@ -573,7 +592,10 @@ export default class CustomImageAutoUploader extends Plugin {
       this.uploadStatus.total = 0
       this.uploadStatus.current = 0
 
-      const tasks: { file: TFile; uploadTasks: UploadTask[] }[] = []
+      const tasks: { file: TFile; content: string; uploadTasks: UploadTask[] }[] = []
+      const resolvedFileCache = new Map<string, Awaited<ReturnType<typeof getAttachmentUploadPath>>>()
+      const uploadResultCache = new Map<string, Promise<Awaited<ReturnType<typeof imageUpload>>>>()
+      let excludeDomainsChanged = false
 
       for (const file of files) {
         const content = await this.app.vault.read(file)
@@ -586,7 +608,12 @@ export default class CustomImageAutoUploader extends Plugin {
             continue
           }
           const linkFile = parsedLink.file
-          const readfile = await getAttachmentUploadPath(linkFile, this)
+          const cacheKey = `${file.path}::${linkFile}`
+          let readfile = resolvedFileCache.get(cacheKey)
+          if (readfile === undefined) {
+            readfile = await getAttachmentUploadPath(linkFile, this, file.path)
+            resolvedFileCache.set(cacheKey, readfile)
+          }
           if (!readfile) continue
 
           fileTasks.push({
@@ -601,17 +628,22 @@ export default class CustomImageAutoUploader extends Plugin {
         }
 
         if (fileTasks.length > 0) {
-          tasks.push({ file, uploadTasks: fileTasks })
+          tasks.push({ file, content, uploadTasks: fileTasks })
         }
       }
 
       for (const item of tasks) {
-        let fileContent = await this.app.vault.read(item.file)
+        let fileContent = item.content
         let isModify = false
 
         const uploadResults = await Promise.all(
           item.uploadTasks.map(async (task) => {
-            const result = await imageUpload(task.imageFile, this.settings.contentSet, this)
+            let resultPromise = uploadResultCache.get(task.imageFile.path)
+            if (!resultPromise) {
+              resultPromise = imageUpload(task.imageFile, this.settings.contentSet, this)
+              uploadResultCache.set(task.imageFile.path, resultPromise)
+            }
+            const result = await resultPromise
             return { task, result }
           })
         )
@@ -625,13 +657,17 @@ export default class CustomImageAutoUploader extends Plugin {
             statusCheck(this)
             const searchStr = this.settings.uploadImageRandomSearch ? `?${generateRandomString(10)}` : ""
             fileContent = replaceInTextForUpload(fileContent, task.matchText, task.imageAlt, result.imageUrl + searchStr, task.imageDisplayText)
-            autoAddExcludeDomain(result.imageUrl, this)
+            excludeDomainsChanged = autoAddExcludeDomain(result.imageUrl, this) || excludeDomainsChanged
           }
         }
 
         if (isModify) {
           await this.app.vault.modify(item.file, fileContent)
         }
+      }
+
+      if (excludeDomainsChanged) {
+        await this.savePluginState()
       }
     } finally {
       window.setTimeout(() => {
@@ -696,6 +732,20 @@ export default class CustomImageAutoUploader extends Plugin {
     new Notice($("已删除 ${count} 张未引用图片", { count: deletedCount }))
   }
 
+  getActiveNoteRemoteImageUrls(): string[] {
+    const activeFile = this.app.workspace.getActiveFile()
+    if (!(activeFile instanceof TFile) || activeFile.extension !== "md") {
+      return []
+    }
+
+    const content = this.app.workspace.activeEditor?.editor?.getValue()
+    return this.extractRemoteImageUrlsFromNote({
+      filePath: activeFile.path,
+      content,
+      cache: this.app.metadataCache.getFileCache(activeFile) ?? undefined,
+    })
+  }
+
   async loadPluginState() {
     const raw = await this.loadData()
 
@@ -739,6 +789,115 @@ export default class CustomImageAutoUploader extends Plugin {
     this.remoteTrashTimer = window.setInterval(() => {
       void this.processPendingRemoteTrashTasks()
     }, this.settings.remoteTrashPollIntervalMs)
+  }
+
+  removeIndexedRemoteReferencesForFile(filePath: string) {
+    const previousUrls = this.remoteImageReferencesByFile.get(filePath)
+    if (!previousUrls) {
+      return
+    }
+
+    for (const imageUrl of previousUrls) {
+      const filePaths = this.remoteImageReferenceFilesByUrl.get(imageUrl)
+      if (!filePaths) {
+        continue
+      }
+
+      filePaths.delete(filePath)
+      if (filePaths.size === 0) {
+        this.remoteImageReferenceFilesByUrl.delete(imageUrl)
+      }
+    }
+
+    this.remoteImageReferencesByFile.delete(filePath)
+  }
+
+  setIndexedRemoteReferencesForFile(filePath: string, imageUrls: string[]) {
+    this.removeIndexedRemoteReferencesForFile(filePath)
+
+    const normalizedUrls = new Set(imageUrls.map((item) => this.normalizeRemoteImageUrl(item)))
+    this.remoteImageReferencesByFile.set(filePath, normalizedUrls)
+
+    for (const imageUrl of normalizedUrls) {
+      const existingFiles = this.remoteImageReferenceFilesByUrl.get(imageUrl) ?? new Set<string>()
+      existingFiles.add(filePath)
+      this.remoteImageReferenceFilesByUrl.set(imageUrl, existingFiles)
+    }
+  }
+
+  async ensureRemoteImageReferenceIndex() {
+    if (this.remoteImageReferenceIndexReady) {
+      return
+    }
+
+    this.remoteImageReferencesByFile.clear()
+    this.remoteImageReferenceFilesByUrl.clear()
+    const contentOverrides = this.getOpenEditorMarkdownOverrides()
+
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const content = contentOverrides[file.path] ?? await this.app.vault.read(file)
+      const imageUrls = this.extractRemoteImageUrlsFromNote({
+        filePath: file.path,
+        content,
+        cache: this.app.metadataCache.getFileCache(file) ?? undefined,
+      })
+      this.setIndexedRemoteReferencesForFile(file.path, imageUrls)
+    }
+
+    this.remoteImageReferenceIndexReady = true
+  }
+
+  async refreshRemoteImageReferenceIndexForFile(file: unknown) {
+    if (!(file instanceof TFile) || file.extension !== "md") {
+      return
+    }
+
+    if (!this.remoteImageReferenceIndexReady) {
+      return
+    }
+
+    const content = this.getOpenEditorMarkdownOverrides()[file.path] ?? await this.app.vault.read(file)
+    const imageUrls = this.extractRemoteImageUrlsFromNote({
+      filePath: file.path,
+      content,
+      cache: this.app.metadataCache.getFileCache(file) ?? undefined,
+    })
+    this.setIndexedRemoteReferencesForFile(file.path, imageUrls)
+  }
+
+  pruneNoteSnapshots() {
+    const now = Date.now()
+    const openFilePaths = new Set(
+      this.app.workspace.getLeavesOfType("markdown")
+        .map((leaf) => leaf.view instanceof MarkdownView ? leaf.view.file?.path : undefined)
+        .filter((path): path is string => typeof path === "string")
+    )
+
+    for (const filePath of Object.keys(this.noteContentSnapshots)) {
+      const touchedAt = this.noteSnapshotTouchedAt[filePath] ?? 0
+      if (!openFilePaths.has(filePath) && now - touchedAt > NOTE_SNAPSHOT_TTL_MS) {
+        delete this.noteContentSnapshots[filePath]
+        delete this.noteSnapshotTouchedAt[filePath]
+      }
+    }
+
+    const snapshotPaths = Object.keys(this.noteContentSnapshots)
+    if (snapshotPaths.length <= MAX_NOTE_SNAPSHOTS) {
+      return
+    }
+
+    const removablePaths = snapshotPaths
+      .filter((filePath) => !openFilePaths.has(filePath))
+      .sort((left, right) => (this.noteSnapshotTouchedAt[left] ?? 0) - (this.noteSnapshotTouchedAt[right] ?? 0))
+
+    while (Object.keys(this.noteContentSnapshots).length > MAX_NOTE_SNAPSHOTS && removablePaths.length > 0) {
+      const filePath = removablePaths.shift()
+      if (!filePath) {
+        break
+      }
+      delete this.noteContentSnapshots[filePath]
+      delete this.noteSnapshotTouchedAt[filePath]
+    }
   }
 
   canHandleRemoteImageContextMenu(imageUrl: string): boolean {
@@ -808,14 +967,20 @@ export default class CustomImageAutoUploader extends Plugin {
     const openOverride = this.getOpenEditorMarkdownOverrides()[file.path]
     if (typeof openOverride === "string") {
       this.noteContentSnapshots[file.path] = openOverride
+      this.noteSnapshotTouchedAt[file.path] = Date.now()
+      this.pruneNoteSnapshots()
       return
     }
 
     try {
       this.noteContentSnapshots[file.path] = await this.app.vault.read(file)
+      this.noteSnapshotTouchedAt[file.path] = Date.now()
     } catch {
       delete this.noteContentSnapshots[file.path]
+      delete this.noteSnapshotTouchedAt[file.path]
     }
+
+    this.pruneNoteSnapshots()
   }
 
   async removeRemoteImageReferenceFromFile(file: TFile, imageUrl: string): Promise<RemoveRemoteImageReferenceResult> {
@@ -892,15 +1057,19 @@ export default class CustomImageAutoUploader extends Plugin {
     await this.savePluginState()
   }
 
-  async reconcilePendingRemoteTrashTasks() {
-    if (this.remoteTrashTasks.pendingTasks.length === 0) {
+  async reconcilePendingRemoteTrashTasks(candidateImageUrls?: string[]) {
+    if (this.remoteTrashTasks.pendingTasks.length === 0 || !candidateImageUrls || candidateImageUrls.length === 0) {
       return
     }
 
     const contentOverrides = this.getOpenEditorMarkdownOverrides()
+    const targetUrls = new Set(candidateImageUrls.map((item) => this.normalizeRemoteImageUrl(item)))
     const cancelledUrls: string[] = []
 
     for (const task of this.remoteTrashTasks.pendingTasks) {
+      if (!targetUrls.has(task.imageUrl)) {
+        continue
+      }
       const isStillReferenced = await this.isRemoteImageReferencedInVault(task.imageUrl, { contentOverrides })
       if (isStillReferenced) {
         cancelledUrls.push(task.imageUrl)
@@ -971,6 +1140,8 @@ export default class CustomImageAutoUploader extends Plugin {
     })
 
     delete this.noteContentSnapshots[file.path]
+    delete this.noteSnapshotTouchedAt[file.path]
+    this.removeIndexedRemoteReferencesForFile(file.path)
 
     if (imageUrls.length === 0) {
       this.removeDeletedNoteRecord(file.path)
@@ -997,20 +1168,27 @@ export default class CustomImageAutoUploader extends Plugin {
     }
 
     await this.captureNoteSnapshot(file)
+    await this.refreshRemoteImageReferenceIndexForFile(file)
     await this.handleRestoredNote(file, file.path)
   }
 
   async handleVaultRename(file: unknown, oldPath: string) {
     if (!(file instanceof TFile) || file.extension !== "md") {
       delete this.noteContentSnapshots[oldPath]
+      delete this.noteSnapshotTouchedAt[oldPath]
+      this.removeIndexedRemoteReferencesForFile(oldPath)
       return
     }
 
     const existingSnapshot = this.noteContentSnapshots[oldPath]
     if (existingSnapshot) {
       this.noteContentSnapshots[file.path] = existingSnapshot
+      this.noteSnapshotTouchedAt[file.path] = this.noteSnapshotTouchedAt[oldPath] ?? Date.now()
       delete this.noteContentSnapshots[oldPath]
+      delete this.noteSnapshotTouchedAt[oldPath]
     }
+
+    this.removeIndexedRemoteReferencesForFile(oldPath)
 
     const previousRecord = this.deletedNoteRecords.find((item) => item.notePath === oldPath)
     if (previousRecord) {
@@ -1020,6 +1198,7 @@ export default class CustomImageAutoUploader extends Plugin {
     }
 
     await this.captureNoteSnapshot(file)
+    await this.refreshRemoteImageReferenceIndexForFile(file)
   }
 
   async handleRestoredNote(file: TFile, lookupPath: string) {
@@ -1255,48 +1434,32 @@ export default class CustomImageAutoUploader extends Plugin {
   }
 
   async getRemoteImageReferenceLocations(imageUrl: string, options?: RemoteImageReferenceSearchOptions): Promise<RemoteImageReferenceLocation[]> {
-    const markdownFiles = this.app.vault.getMarkdownFiles()
+    await this.ensureRemoteImageReferenceIndex()
     const normalizedImageUrl = this.normalizeRemoteImageUrl(imageUrl)
     const contentOverrides = options?.contentOverrides ?? {}
     const excludedPaths = new Set(options?.excludeFilePaths ?? [])
     const locations: RemoteImageReferenceLocation[] = []
 
-    for (const file of markdownFiles) {
-      if (excludedPaths.has(file.path)) {
+    const candidatePaths = new Set(this.remoteImageReferenceFilesByUrl.get(normalizedImageUrl) ?? [])
+    for (const filePath of Object.keys(contentOverrides)) {
+      candidatePaths.add(filePath)
+    }
+
+    for (const filePath of candidatePaths) {
+      if (excludedPaths.has(filePath)) {
         continue
       }
 
-      const hasContentOverride = Object.prototype.hasOwnProperty.call(contentOverrides, file.path)
-      const content = hasContentOverride ? contentOverrides[file.path] : await this.app.vault.read(file)
-      const markdownMatches = content.matchAll(markdownImageRegex)
-      for (const match of markdownMatches) {
-        if (this.normalizeRemoteImageUrl(match[2]) === normalizedImageUrl) {
-          locations.push({ filePath: file.path, kind: "markdown" })
-          break
+      if (Object.prototype.hasOwnProperty.call(contentOverrides, filePath)) {
+        const overrideUrls = this.extractRemoteImageUrlsFromNote({ filePath, content: contentOverrides[filePath] })
+        if (overrideUrls.includes(normalizedImageUrl)) {
+          locations.push({ filePath, kind: "markdown" })
         }
-      }
-
-      const frontmatterValues = this.extractRemoteImageUrlsFromFrontmatter(content)
-      if (frontmatterValues.some((value) => this.normalizeRemoteImageUrl(value) === normalizedImageUrl)) {
-        locations.push({ filePath: file.path, kind: "metadata" })
         continue
       }
 
-      if (hasContentOverride) {
-        continue
-      }
-
-      const cache = this.app.metadataCache.getFileCache(file)
-      if (!cache) continue
-
-      const metadata = metadataCacheHandle(cache, this)
-      for (const item of metadata) {
-        for (const value of item.value) {
-          if (/^https?:\/\//i.test(value) && this.normalizeRemoteImageUrl(value) === normalizedImageUrl) {
-            locations.push({ filePath: file.path, kind: "metadata" })
-            break
-          }
-        }
+      if (this.remoteImageReferencesByFile.get(filePath)?.has(normalizedImageUrl)) {
+        locations.push({ filePath, kind: "markdown" })
       }
     }
 

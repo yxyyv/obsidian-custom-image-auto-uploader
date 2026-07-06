@@ -77,7 +77,7 @@ export interface PluginSettings {
 // 默认插件设置
 export const DEFAULT_SETTINGS: PluginSettings = {
   // 是否自动上传
-  isAutoUpload: true,
+  isAutoUpload: false,
   // 是否自动下载
   isAutoDown: true,
   // 是否关闭提示
@@ -94,7 +94,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   // 排除的域名列表
   excludeDomains: "",
   // 本地图片上传后是否删除
-  isDeleteSource: true,
+  isDeleteSource: false,
   // 上传后的图片是否随机后缀
   uploadImageRandomSearch: true,
   // 图片预压缩设置

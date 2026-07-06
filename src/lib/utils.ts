@@ -116,8 +116,8 @@ export async function getAttachmentSavePath(file: string, plugin: CustomImageAut
  * @param plugin - 插件实例
  * @returns 附件上传路径
  */
-export async function getAttachmentUploadPath(image: string, plugin: CustomImageAutoUploader): Promise<TFile | null> {
-  return plugin.app.metadataCache.getFirstLinkpathDest(image, image)
+export async function getAttachmentUploadPath(image: string, plugin: CustomImageAutoUploader, sourcePath?: string): Promise<TFile | null> {
+  return plugin.app.metadataCache.getFirstLinkpathDest(image, sourcePath ?? image)
 }
 
 function isImageSizeSpec(value: string): boolean {
@@ -231,7 +231,7 @@ export function hasExcludeDomain(src: string, excludeDomains: string): boolean {
  * @param src - 源URL
  * @param plugin - 插件实例
  */
-export function autoAddExcludeDomain(src: string, plugin: CustomImageAutoUploader): void {
+export function autoAddExcludeDomain(src: string, plugin: CustomImageAutoUploader): boolean {
   let url = new URL(src)
   const domain = url.hostname
   let has = hasExcludeDomain(src, plugin.settings.excludeDomains)
@@ -239,8 +239,9 @@ export function autoAddExcludeDomain(src: string, plugin: CustomImageAutoUploade
   if (!has) {
     plugin.settings.excludeDomains += `\n${domain}`
     plugin.settings.excludeDomains = plugin.settings.excludeDomains.trim()
+    return true
   }
-  plugin.saveSettings(false)
+  return false
 }
 
 /**
@@ -253,7 +254,7 @@ export async function imageDown(url: string, plugin: CustomImageAutoUploader): P
   const response = await requestUrl({ url })
 
   if (response.status !== 200) {
-    return { err: false, msg: $("网络错误,请检查网络是否通畅") }
+    return { err: true, msg: $("网络错误,请检查网络是否通畅") }
   }
 
   let type = <FileTypeResult>await fileTypeFromBuffer(response.arrayBuffer)
@@ -262,13 +263,11 @@ export async function imageDown(url: string, plugin: CustomImageAutoUploader): P
     return { err: true, msg: $("下载文件不是允许的图片类型") }
   }
 
-  let urlObj = new URL(url)
-
   try {
     const name = getUrlFileName(url, false) != "" ? getUrlFileName(url, false) : getFileRandomSaveKey()
     const path = `${name}.${type.ext}`
     const userPath = await getAttachmentSavePath(path, plugin)
-    checkCreateFolder(getDirname(userPath), this.app.vault)
+    await checkCreateFolder(getDirname(userPath), plugin.app.vault)
 
     await plugin.app.vault.createBinary(userPath, response.arrayBuffer)
 
