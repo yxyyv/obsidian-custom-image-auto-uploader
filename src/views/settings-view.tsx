@@ -95,16 +95,9 @@ export const SettingsView = ({ plugin }: { plugin: CustomImageAutoUploader }) =>
             <tr>
               <td style={{ textAlign: "center" }}>{$("自行搭建")}</td>
               <td>
-                <a href="https://github.com/haierkeys/custom-image-gateway">https://github.com/haierkeys/custom-image-gateway</a>
+                <a href="https://github.com/yxyyv/custom-image-gateway">https://github.com/yxyyv/custom-image-gateway</a>
               </td>
               <td style={{ textAlign: "center" }}>{$("速度好, 自由配置, 无隐私风险, 支持云存储和服务端存储")}</td>
-            </tr>
-            <tr>
-              <td style={{ textAlign: "center" }}>{$("多用户开放网关")}</td>
-              <td>
-                <a href="https://img.diybeta.com/">https://img.diybeta.com</a>
-              </td>
-              <td style={{ textAlign: "center" }}>{$("稳定性好, 仅支持用户的云存储")}</td>
             </tr>
           </tbody>
         </table>
