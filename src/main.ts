@@ -8,6 +8,7 @@ import {
   imageDown,
   imageUpload,
   metadataCacheHandle,
+  parseMarkdownImageLink,
   parseWikiImageLink,
   replaceInTextForDownload,
   replaceInTextForUpload,
@@ -321,33 +322,8 @@ export default class CustomImageAutoUploader extends Plugin {
       fileContent = fileFullContent
     }
 
-    const uploadTasks: UploadTask[] = []
     const activeFile = this.app.workspace.getActiveFile()
-    const matches = fileContent.matchAll(wikilinkImageRegex)
-    const uniqueTask = new Set<string>()
-    for (const match of matches) {
-      if (uniqueTask.has(match[0])) continue
-      uniqueTask.add(match[0])
-
-      const parsedLink = parseWikiImageLink(match[1])
-      if (/^http/.test(parsedLink.file)) {
-        continue
-      }
-
-      const file = parsedLink.file
-      const readfile = await getAttachmentUploadPath(file, this, activeFile?.path)
-      if (!readfile) continue
-
-      uploadTasks.push({
-        matchText: match[0],
-        imageAlt: parsedLink.imageAlt,
-        imageDisplayText: parsedLink.imageDisplayText,
-        imageSize: parsedLink.imageSize,
-        imageFile: readfile,
-      })
-      this.uploadStatus.total++
-      statusCheck(this)
-    }
+    const uploadTasks = await this.collectContentUploadTasks(fileContent, activeFile?.path)
 
     let isModify = false
     let excludeDomainsChanged = false
@@ -601,33 +577,7 @@ export default class CustomImageAutoUploader extends Plugin {
 
       for (const file of files) {
         const content = await this.app.vault.read(file)
-        const fileTasks: UploadTask[] = []
-        const matches = content.matchAll(wikilinkImageRegex)
-
-        for (const match of matches) {
-          const parsedLink = parseWikiImageLink(match[1])
-          if (/^http/.test(parsedLink.file)) {
-            continue
-          }
-          const linkFile = parsedLink.file
-          const cacheKey = `${file.path}::${linkFile}`
-          let readfile = resolvedFileCache.get(cacheKey)
-          if (readfile === undefined) {
-            readfile = await getAttachmentUploadPath(linkFile, this, file.path)
-            resolvedFileCache.set(cacheKey, readfile)
-          }
-          if (!readfile) continue
-
-          fileTasks.push({
-            matchText: match[0],
-            imageAlt: parsedLink.imageAlt,
-            imageDisplayText: parsedLink.imageDisplayText,
-            imageSize: parsedLink.imageSize,
-            imageFile: readfile,
-          })
-          this.uploadStatus.total++
-          statusCheck(this)
-        }
+        const fileTasks = await this.collectContentUploadTasks(content, file.path, resolvedFileCache)
 
         if (fileTasks.length > 0) {
           tasks.push({ file, content, uploadTasks: fileTasks })
@@ -1736,5 +1686,84 @@ export default class CustomImageAutoUploader extends Plugin {
 
   createTaskId(): string {
     return `remote-trash-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  async collectContentUploadTasks(
+    content: string,
+    sourcePath?: string,
+    resolvedFileCache?: Map<string, Awaited<ReturnType<typeof getAttachmentUploadPath>>>
+  ): Promise<UploadTask[]> {
+    const uploadTasks: UploadTask[] = []
+    const uniqueTask = new Set<string>()
+
+    for (const match of content.matchAll(wikilinkImageRegex)) {
+      if (uniqueTask.has(match[0])) {
+        continue
+      }
+      uniqueTask.add(match[0])
+
+      const parsedLink = parseWikiImageLink(match[1])
+      if (/^http/i.test(parsedLink.file)) {
+        continue
+      }
+
+      const readfile = await this.resolveUploadFile(parsedLink.file, sourcePath, resolvedFileCache)
+      if (!readfile) {
+        continue
+      }
+
+      uploadTasks.push({
+        matchText: match[0],
+        imageAlt: parsedLink.imageAlt,
+        imageDisplayText: parsedLink.imageDisplayText,
+        imageSize: parsedLink.imageSize,
+        imageFile: readfile,
+      })
+      this.uploadStatus.total++
+      statusCheck(this)
+    }
+
+    for (const match of content.matchAll(markdownImageRegex)) {
+      if (uniqueTask.has(match[0])) {
+        continue
+      }
+      uniqueTask.add(match[0])
+
+      const parsedLink = parseMarkdownImageLink(match[1] ?? "", match[2] ?? "")
+      if (/^http/i.test(parsedLink.file)) {
+        continue
+      }
+
+      const readfile = await this.resolveUploadFile(parsedLink.file, sourcePath, resolvedFileCache)
+      if (!readfile) {
+        continue
+      }
+
+      uploadTasks.push({
+        matchText: match[0],
+        imageAlt: parsedLink.imageAlt,
+        imageDisplayText: parsedLink.imageDisplayText,
+        imageFile: readfile,
+      })
+      this.uploadStatus.total++
+      statusCheck(this)
+    }
+
+    return uploadTasks
+  }
+
+  async resolveUploadFile(
+    linkPath: string,
+    sourcePath?: string,
+    resolvedFileCache?: Map<string, Awaited<ReturnType<typeof getAttachmentUploadPath>>>
+  ): Promise<Awaited<ReturnType<typeof getAttachmentUploadPath>>> {
+    const cacheKey = `${sourcePath ?? ""}::${linkPath}`
+    if (resolvedFileCache?.has(cacheKey)) {
+      return resolvedFileCache.get(cacheKey) ?? null
+    }
+
+    const readfile = await getAttachmentUploadPath(linkPath, this, sourcePath)
+    resolvedFileCache?.set(cacheKey, readfile)
+    return readfile
   }
 }

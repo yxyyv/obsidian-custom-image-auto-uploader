@@ -131,6 +131,12 @@ export interface ParsedWikiImageLink {
   imageSize?: string
 }
 
+export interface ParsedMarkdownImageLink {
+  file: string
+  imageAlt: string
+  imageDisplayText: string
+}
+
 export function parseWikiImageLink(rawLink: string): ParsedWikiImageLink {
   const [rawFile = "", ...displayParts] = rawLink.split("|")
   const file = rawFile.trim()
@@ -152,6 +158,17 @@ export function parseWikiImageLink(rawLink: string): ParsedWikiImageLink {
     file,
     imageAlt: normalizedParts.join("|").trim() || file,
     imageDisplayText: normalizedParts.join("|").trim() || file,
+  }
+}
+
+export function parseMarkdownImageLink(rawAlt: string, rawPath: string): ParsedMarkdownImageLink {
+  const normalizedPath = rawPath.trim().replace(/^<|>$/g, "")
+  const imageAlt = rawAlt.trim()
+
+  return {
+    file: decodeURI(normalizedPath),
+    imageAlt,
+    imageDisplayText: imageAlt,
   }
 }
 
